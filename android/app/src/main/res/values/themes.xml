@@ -1,0 +1,3 @@
+<resources>
+    <style name="Theme.C1Recorder" parent="android:Theme.Material.Light.NoActionBar" />
+</resources>

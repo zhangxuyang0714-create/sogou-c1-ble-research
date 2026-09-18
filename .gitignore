@@ -1,0 +1,28 @@
+# Local toolchain (JDK/Android SDK/Gradle), downloaded, not source
+android-tools/
+
+# Android build outputs / local machine config
+android/.gradle/
+android/local.properties
+android/app/build/
+android/build/
+**/build/
+*.apk
+
+# Python venv
+.venv/
+
+# APK reverse-engineering workspace: binary APK, decompiled proprietary
+# source, and bundled JRE/jadx tool — reference material, not this project's
+# own source. Findings are already written up in docs/apk-protocol-recovery.md
+# and docs/FINAL-investigation-summary.md.
+research/
+
+# Raw wire-capture dumps and third-party read-only clone
+captures/
+reference/
+
+logs/
+.trash/
+__pycache__/
+*.pyc
