@@ -27,7 +27,7 @@ class MainViewModel(
     }
 
     fun connect(address: String) {
-        viewModelScope.launch { repository.connect(address) }
+        repository.connect(address)
     }
 
     fun disconnect() {
@@ -40,6 +40,7 @@ class MainViewModel(
 
     override fun onCleared() {
         scanner.stopScan()
+        repository.disconnect()
     }
 
     class Factory(

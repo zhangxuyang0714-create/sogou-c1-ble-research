@@ -1,37 +1,47 @@
 package com.c1recorder.app.data
 
+import com.c1recorder.app.ble.C1BleClient
+import com.c1recorder.app.ble.C1ClientState
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 
 /**
  * What the UI/ViewModel layer is allowed to know about the C1 device.
- * Implementations (real BLE client, fake client) live below this interface;
- * Compose code must only ever talk to this, never to BluetoothGatt directly.
+ * Implementations sit on top of a C1BleClient (real or fake); Compose code
+ * must only ever talk to this, never to BluetoothGatt directly.
  */
 interface C1Repository {
-    val connectionState: StateFlow<C1ConnectionState>
+    val connectionState: StateFlow<C1ClientState>
     val device: StateFlow<C1Device?>
     val sessions: StateFlow<List<RecordingSession>>
 
-    suspend fun connect(address: String)
+    fun connect(address: String)
     fun disconnect()
     suspend fun refreshSessions()
 }
 
 /**
- * No-op placeholder used while the real BLE client (Phase 2-4) doesn't exist
- * yet. Lets the app skeleton compile and run before any BLE code is written.
+ * connectionState is a direct passthrough of the underlying client's state —
+ * there is nothing to translate yet. device/sessions stay empty placeholders
+ * until Phase 5 (device info) and Phase 6 (getSessions) read them over the
+ * connection this phase establishes.
  */
-class StubC1Repository : C1Repository {
-    override val connectionState = kotlinx.coroutines.flow.MutableStateFlow(C1ConnectionState.DISCONNECTED)
-    override val device = kotlinx.coroutines.flow.MutableStateFlow<C1Device?>(null)
-    override val sessions = kotlinx.coroutines.flow.MutableStateFlow<List<RecordingSession>>(emptyList())
+class DefaultC1Repository(private val client: C1BleClient) : C1Repository {
+    override val connectionState: StateFlow<C1ClientState> = client.state
 
-    override suspend fun connect(address: String) {
-        // Intentionally unimplemented: BLE connection lands in Phase 3.
+    private val _device = MutableStateFlow<C1Device?>(null)
+    override val device: StateFlow<C1Device?> = _device.asStateFlow()
+
+    private val _sessions = MutableStateFlow<List<RecordingSession>>(emptyList())
+    override val sessions: StateFlow<List<RecordingSession>> = _sessions.asStateFlow()
+
+    override fun connect(address: String) {
+        client.connect(address)
     }
 
     override fun disconnect() {
-        // Intentionally unimplemented: BLE connection lands in Phase 3.
+        client.disconnect()
     }
 
     override suspend fun refreshSessions() {

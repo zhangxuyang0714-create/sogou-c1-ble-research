@@ -10,17 +10,19 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.ui.Modifier
+import com.c1recorder.app.ble.AndroidC1BleClient
 import com.c1recorder.app.ble.AndroidC1BleScanner
-import com.c1recorder.app.data.StubC1Repository
+import com.c1recorder.app.data.DefaultC1Repository
 import com.c1recorder.app.ui.MainScreen
 import com.c1recorder.app.ui.MainViewModel
 
 class MainActivity : ComponentActivity() {
 
     private val scanner by lazy { AndroidC1BleScanner(applicationContext) }
+    private val bleClient by lazy { AndroidC1BleClient(applicationContext) }
 
     private val viewModel: MainViewModel by viewModels {
-        MainViewModel.Factory(StubC1Repository(), scanner)
+        MainViewModel.Factory(DefaultC1Repository(bleClient), scanner)
     }
 
     private val requestBlePermissions = registerForActivityResult(

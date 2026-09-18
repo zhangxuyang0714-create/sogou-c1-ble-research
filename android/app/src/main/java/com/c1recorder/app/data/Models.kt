@@ -1,13 +1,5 @@
 package com.c1recorder.app.data
 
-/** UI/Repository-facing device connection lifecycle. Independent of any GATT type. */
-enum class C1ConnectionState {
-    DISCONNECTED,
-    SCANNING,
-    CONNECTING,
-    CONNECTED,
-}
-
 data class C1Device(
     val address: String,
     val name: String? = null,
