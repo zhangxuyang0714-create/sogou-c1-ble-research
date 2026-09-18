@@ -1,5 +1,6 @@
 package com.c1recorder.app.ble
 
+import com.c1recorder.app.protocol.C1Protocol
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -56,4 +57,20 @@ class FakeC1BleClient : C1BleClient {
     fun simulateDisconnected() {
         _state.value = C1ClientState.Disconnected
     }
+
+    // Fixed, overridable fake device info — lets Compose UI be built and
+    // manually exercised without a real C1 connected. Defaults mirror the
+    // real device's values from docs/FINAL-investigation-summary.md.
+    var fakeSerialNumber: Result<String> = Result.success("5200000000000000")
+    var fakeFirmwareVersion: Result<String> = Result.success("V127")
+    var fakeBatteryLevel: Result<Int> = Result.success(80)
+    var fakeState: Result<Int> = Result.success(C1Protocol.StateValue.IDLE)
+    var fakeStorage: Result<C1Protocol.StorageInfo> =
+        Result.success(C1Protocol.StorageInfo(totalKB = 15_258_988L, freeKB = 1_048_576L, bytesPerSecond = 0L, isFull = false))
+
+    override suspend fun readSerialNumber(): Result<String> = fakeSerialNumber
+    override suspend fun readFirmwareVersion(): Result<String> = fakeFirmwareVersion
+    override suspend fun readBatteryLevel(): Result<Int> = fakeBatteryLevel
+    override suspend fun readState(): Result<Int> = fakeState
+    override suspend fun readStorage(): Result<C1Protocol.StorageInfo> = fakeStorage
 }

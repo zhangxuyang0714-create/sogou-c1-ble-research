@@ -15,18 +15,25 @@ import android.os.Looper
 import android.util.Log
 import androidx.core.content.ContextCompat
 import com.c1recorder.app.protocol.C1Protocol
+import kotlinx.coroutines.CancellableContinuation
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withTimeoutOrNull
+import java.io.IOException
+import java.util.concurrent.TimeoutException
 
 private const val TAG = "C1Ble"
 private const val CONNECT_TIMEOUT_MS = 15_000L
 private const val HANDSHAKE_TIMEOUT_MS = 10_000L
+private const val OPERATION_TIMEOUT_MS = 8_000L
 
 class AndroidC1BleClient(
     private val context: Context,
     private val connectTimeoutMs: Long = CONNECT_TIMEOUT_MS,
     private val handshakeTimeoutMs: Long = HANDSHAKE_TIMEOUT_MS,
+    private val operationTimeoutMs: Long = OPERATION_TIMEOUT_MS,
 ) : C1BleClient {
 
     private val bluetoothManager = context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
@@ -37,9 +44,20 @@ class AndroidC1BleClient(
     private var gatt: BluetoothGatt? = null
     private var cmdWriteCharacteristic: BluetoothGattCharacteristic? = null
     private var cmdIndicateCharacteristic: BluetoothGattCharacteristic? = null
+    private var firmwareVersionCharacteristic: BluetoothGattCharacteristic? = null
+    private var serialNumberCharacteristic: BluetoothGattCharacteristic? = null
+    private var stateCharacteristic: BluetoothGattCharacteristic? = null
+    private var batteryLevelCharacteristic: BluetoothGattCharacteristic? = null
 
     private val timeoutHandler = Handler(Looper.getMainLooper())
     private var timeoutRunnable: Runnable? = null
+
+    // The GATT connection only allows one outstanding operation at a time;
+    // callers of readXxx()/readStorage() must await each before starting the
+    // next. These two fields track whichever single operation is in flight.
+    private var pendingRead: CancellableContinuation<Result<ByteArray>>? = null
+    private var pendingIndicate: CancellableContinuation<Result<ByteArray>>? = null
+    private var pendingIndicateExpectedOpcodes: Set<Int> = emptySet()
 
     private fun hasPermission(permission: String): Boolean =
         ContextCompat.checkSelfPermission(context, permission) == PackageManager.PERMISSION_GRANTED
@@ -83,6 +101,10 @@ class AndroidC1BleClient(
             }
             cmdWriteCharacteristic = byUuid.getValue(C1Protocol.Characteristic.CMD_WRITE)
             cmdIndicateCharacteristic = byUuid.getValue(C1Protocol.Characteristic.CMD_INDICATE)
+            firmwareVersionCharacteristic = byUuid.getValue(C1Protocol.Characteristic.FIRMWARE_VERSION)
+            serialNumberCharacteristic = byUuid.getValue(C1Protocol.Characteristic.SERIAL_NUMBER)
+            stateCharacteristic = byUuid.getValue(C1Protocol.Characteristic.STATE)
+            batteryLevelCharacteristic = byUuid.getValue(C1Protocol.Characteristic.BATTERY_LEVEL)
             startHandshake(g)
         }
 
@@ -108,21 +130,58 @@ class AndroidC1BleClient(
 
         override fun onCharacteristicWrite(g: BluetoothGatt, characteristic: BluetoothGattCharacteristic, status: Int) {
             if (characteristic.uuid != C1Protocol.Characteristic.CMD_WRITE) return
-            if (_state.value != C1ClientState.PerformingHandshake) return
-            if (status != BluetoothGatt.GATT_SUCCESS) {
-                cleanupAfterFailure("握手包写入失败 status=$status")
+            when (_state.value) {
+                C1ClientState.PerformingHandshake -> {
+                    if (status != BluetoothGatt.GATT_SUCCESS) {
+                        cleanupAfterFailure("握手包写入失败 status=$status")
+                    }
+                    // else: wait for the indicate on cmdIndicate — that's the actual handshake ack.
+                }
+                C1ClientState.Ready -> {
+                    if (status != BluetoothGatt.GATT_SUCCESS) {
+                        val cont = pendingIndicate
+                        pendingIndicate = null
+                        cont?.resume(Result.failure(IOException("写入失败 status=$status")), onCancellation = null)
+                    }
+                    // else: wait for the matching indicate in onCharacteristicChanged.
+                }
+                else -> Unit
             }
-            // else: wait for the indicate on cmdIndicate — that's the actual handshake ack.
         }
 
         @Suppress("DEPRECATION", "OVERRIDE_DEPRECATION")
         override fun onCharacteristicChanged(g: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
             if (characteristic.uuid != C1Protocol.Characteristic.CMD_INDICATE) return
-            if (_state.value != C1ClientState.PerformingHandshake) return
-            val opcode = C1Protocol.parseResponseOpcode(characteristic.value ?: ByteArray(0))
-            Log.i(TAG, "handshake ack, opcode=$opcode")
-            clearTimeout()
-            _state.value = C1ClientState.Ready
+            val data = characteristic.value ?: ByteArray(0)
+            when (_state.value) {
+                C1ClientState.PerformingHandshake -> {
+                    Log.i(TAG, "handshake ack, opcode=${C1Protocol.parseResponseOpcode(data)}")
+                    clearTimeout()
+                    _state.value = C1ClientState.Ready
+                }
+                C1ClientState.Ready -> {
+                    val opcode = C1Protocol.parseResponseOpcode(data)
+                    if (opcode !in pendingIndicateExpectedOpcodes) {
+                        Log.i(TAG, "ignoring indicate opcode=$opcode, waiting for $pendingIndicateExpectedOpcodes")
+                        return
+                    }
+                    val cont = pendingIndicate
+                    pendingIndicate = null
+                    cont?.resume(Result.success(data), onCancellation = null)
+                }
+                else -> Unit
+            }
+        }
+
+        @Suppress("DEPRECATION", "OVERRIDE_DEPRECATION")
+        override fun onCharacteristicRead(g: BluetoothGatt, characteristic: BluetoothGattCharacteristic, status: Int) {
+            val cont = pendingRead ?: return
+            pendingRead = null
+            if (status == BluetoothGatt.GATT_SUCCESS) {
+                cont.resume(Result.success(characteristic.value ?: ByteArray(0)), onCancellation = null)
+            } else {
+                cont.resume(Result.failure(IOException("读取失败 status=$status")), onCancellation = null)
+            }
         }
     }
 
@@ -196,6 +255,95 @@ class AndroidC1BleClient(
         _state.value = C1ClientState.Disconnected
     }
 
+    override suspend fun readSerialNumber(): Result<String> =
+        readCharacteristicRaw(serialNumberCharacteristic, "SN").map { C1Protocol.parseSerialNumber(it) }
+
+    override suspend fun readFirmwareVersion(): Result<String> =
+        readCharacteristicRaw(firmwareVersionCharacteristic, "固件版本").mapCatching {
+            C1Protocol.parseFirmwareVersion(it) ?: error("固件版本格式异常")
+        }
+
+    override suspend fun readBatteryLevel(): Result<Int> =
+        readCharacteristicRaw(batteryLevelCharacteristic, "电量").mapCatching {
+            C1Protocol.parseBatteryLevel(it) ?: error("电量数据为空")
+        }
+
+    override suspend fun readState(): Result<Int> =
+        readCharacteristicRaw(stateCharacteristic, "设备状态").mapCatching {
+            C1Protocol.parseStateRaw(it) ?: error("状态数据格式异常")
+        }
+
+    override suspend fun readStorage(): Result<C1Protocol.StorageInfo> =
+        sendCommandAndAwaitIndicate(
+            frame = C1Protocol.buildGetStorageFrame(),
+            expectedOpcodes = setOf(C1Protocol.ResponseOpcode.GET_STORAGE_CONFIRM),
+            label = "存储信息",
+        ).mapCatching { C1Protocol.parseStorageResponse(it) ?: error("存储信息格式异常") }
+
+    @Suppress("DEPRECATION")
+    private suspend fun readCharacteristicRaw(characteristic: BluetoothGattCharacteristic?, label: String): Result<ByteArray> {
+        val g = gatt ?: return Result.failure(IllegalStateException("未连接"))
+        val target = characteristic ?: return Result.failure(IllegalStateException("$label 特征值不存在"))
+        if (_state.value != C1ClientState.Ready) return Result.failure(IllegalStateException("设备未就绪"))
+        if (pendingRead != null || pendingIndicate != null) {
+            return Result.failure(IllegalStateException("已有操作进行中"))
+        }
+
+        val result = withTimeoutOrNull(operationTimeoutMs) {
+            suspendCancellableCoroutine { cont ->
+                pendingRead = cont
+                val started = try {
+                    g.readCharacteristic(target)
+                } catch (e: SecurityException) {
+                    false
+                }
+                if (!started) {
+                    pendingRead = null
+                    cont.resume(Result.failure(IllegalStateException("$label 读取请求失败")), onCancellation = null)
+                }
+                cont.invokeOnCancellation { pendingRead = null }
+            }
+        }
+        if (result == null) {
+            pendingRead = null
+            return Result.failure(TimeoutException("$label 读取超时"))
+        }
+        return result
+    }
+
+    @Suppress("DEPRECATION")
+    private suspend fun sendCommandAndAwaitIndicate(frame: ByteArray, expectedOpcodes: Set<Int>, label: String): Result<ByteArray> {
+        val g = gatt ?: return Result.failure(IllegalStateException("未连接"))
+        val writeChar = cmdWriteCharacteristic ?: return Result.failure(IllegalStateException("cmdWrite 特征值不存在"))
+        if (_state.value != C1ClientState.Ready) return Result.failure(IllegalStateException("设备未就绪"))
+        if (pendingRead != null || pendingIndicate != null) {
+            return Result.failure(IllegalStateException("已有操作进行中"))
+        }
+
+        val result = withTimeoutOrNull(operationTimeoutMs) {
+            suspendCancellableCoroutine { cont ->
+                pendingIndicate = cont
+                pendingIndicateExpectedOpcodes = expectedOpcodes
+                writeChar.value = frame
+                val started = try {
+                    g.writeCharacteristic(writeChar)
+                } catch (e: SecurityException) {
+                    false
+                }
+                if (!started) {
+                    pendingIndicate = null
+                    cont.resume(Result.failure(IllegalStateException("$label 请求发送失败")), onCancellation = null)
+                }
+                cont.invokeOnCancellation { pendingIndicate = null }
+            }
+        }
+        if (result == null) {
+            pendingIndicate = null
+            return Result.failure(TimeoutException("$label 超时"))
+        }
+        return result
+    }
+
     private fun cleanupAfterFailure(reason: String) {
         clearTimeout()
         closeGatt()
@@ -212,6 +360,29 @@ class AndroidC1BleClient(
         gatt = null
         cmdWriteCharacteristic = null
         cmdIndicateCharacteristic = null
+        firmwareVersionCharacteristic = null
+        serialNumberCharacteristic = null
+        stateCharacteristic = null
+        batteryLevelCharacteristic = null
+
+        // GATT callbacks can run on a different thread than whoever called
+        // disconnect(), so a pending continuation may already have been
+        // resumed by the time we get here — resume is not safe to call twice.
+        val readCont = pendingRead
+        pendingRead = null
+        readCont?.let { safeResume(it, Result.failure(IOException("连接已断开"))) }
+
+        val indicateCont = pendingIndicate
+        pendingIndicate = null
+        indicateCont?.let { safeResume(it, Result.failure(IOException("连接已断开"))) }
+    }
+
+    private fun safeResume(cont: CancellableContinuation<Result<ByteArray>>, value: Result<ByteArray>) {
+        try {
+            cont.resume(value) { _, _, _ -> }
+        } catch (e: IllegalStateException) {
+            // Already resumed/cancelled from the GATT callback thread — fine, ignore.
+        }
     }
 
     private fun clearTimeout() {

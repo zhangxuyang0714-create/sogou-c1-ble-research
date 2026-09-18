@@ -25,6 +25,16 @@ interface C1BleClient {
     val state: StateFlow<C1ClientState>
     fun connect(address: String)
     fun disconnect()
+
+    // Only safe to call once state is Ready. Each call is its own
+    // independently-timed-out operation; callers must await one before
+    // starting the next — the underlying GATT connection only supports one
+    // outstanding operation at a time.
+    suspend fun readSerialNumber(): Result<String>
+    suspend fun readFirmwareVersion(): Result<String>
+    suspend fun readBatteryLevel(): Result<Int>
+    suspend fun readState(): Result<Int>
+    suspend fun readStorage(): Result<C1Protocol.StorageInfo>
 }
 
 /**

@@ -24,6 +24,8 @@ import androidx.compose.ui.unit.dp
 import com.c1recorder.app.ble.C1ClientState
 import com.c1recorder.app.ble.ScanState
 import com.c1recorder.app.ble.ScannedDevice
+import com.c1recorder.app.data.C1Device
+import com.c1recorder.app.protocol.C1Protocol
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -48,7 +50,7 @@ fun MainScreen(viewModel: MainViewModel, onRequestPermissions: () -> Unit) {
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             Text("连接状态: ${connectionState.label()}", style = MaterialTheme.typography.titleMedium)
-            Text(device?.name ?: "尚未连接设备")
+            DeviceInfoSection(device)
             Button(onClick = viewModel::disconnect, enabled = connectionState != C1ClientState.Disconnected) {
                 Text("断开连接")
             }
@@ -62,6 +64,38 @@ fun MainScreen(viewModel: MainViewModel, onRequestPermissions: () -> Unit) {
             )
         }
     }
+}
+
+@Composable
+private fun DeviceInfoSection(device: C1Device?) {
+    if (device == null) {
+        Text("尚未连接设备")
+        return
+    }
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text(device.name ?: device.address, style = MaterialTheme.typography.titleSmall)
+            Text("SN: ${device.sn ?: "读取失败"}")
+            Text("固件版本: ${device.firmware ?: "读取失败"}")
+            Text("电量: ${device.batteryPercent?.let { "$it%" } ?: "读取失败"}")
+            Text("状态: ${device.stateRaw.toStateLabel()}")
+            Text("存储: ${formatStorage(device.freeStorageKB, device.totalStorageKB)}")
+        }
+    }
+}
+
+private fun Int?.toStateLabel(): String = when (this) {
+    null -> "读取失败"
+    C1Protocol.StateValue.IDLE -> "空闲"
+    C1Protocol.StateValue.RECORDING -> "录音中"
+    else -> "未知 (0x%04x)".format(this)
+}
+
+private fun formatStorage(freeKB: Long?, totalKB: Long?): String {
+    if (freeKB == null || totalKB == null) return "读取失败"
+    val freeGB = freeKB / 1024.0 / 1024.0
+    val totalGB = totalKB / 1024.0 / 1024.0
+    return "%.2f / %.2f GB 可用".format(freeGB, totalGB)
 }
 
 @Composable
