@@ -73,4 +73,13 @@ class FakeC1BleClient : C1BleClient {
     override suspend fun readBatteryLevel(): Result<Int> = fakeBatteryLevel
     override suspend fun readState(): Result<Int> = fakeState
     override suspend fun readStorage(): Result<C1Protocol.StorageInfo> = fakeStorage
+
+    // Keyed by the startSessionId a page was requested with, so tests can
+    // script multi-page pagination the same way the real device paginates
+    // (see docs/FINAL-investigation-summary.md and DefaultC1Repository).
+    // Any startSessionId not present here returns an empty page.
+    var fakeSessionPages: Map<Long, Result<List<C1Protocol.SessionEntry>>> = emptyMap()
+
+    override suspend fun getSessions(startSessionId: Long): Result<List<C1Protocol.SessionEntry>> =
+        fakeSessionPages[startSessionId] ?: Result.success(emptyList())
 }

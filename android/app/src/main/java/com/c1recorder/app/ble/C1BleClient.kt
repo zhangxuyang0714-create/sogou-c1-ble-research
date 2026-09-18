@@ -35,6 +35,9 @@ interface C1BleClient {
     suspend fun readBatteryLevel(): Result<Int>
     suspend fun readState(): Result<Int>
     suspend fun readStorage(): Result<C1Protocol.StorageInfo>
+
+    /** One page of the session list, starting at startSessionId (0 = first page). Callers paginate; see DefaultC1Repository.refreshSessions. */
+    suspend fun getSessions(startSessionId: Long): Result<List<C1Protocol.SessionEntry>>
 }
 
 /**

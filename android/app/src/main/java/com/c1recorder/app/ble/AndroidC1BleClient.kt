@@ -280,6 +280,13 @@ class AndroidC1BleClient(
             label = "存储信息",
         ).mapCatching { C1Protocol.parseStorageResponse(it) ?: error("存储信息格式异常") }
 
+    override suspend fun getSessions(startSessionId: Long): Result<List<C1Protocol.SessionEntry>> =
+        sendCommandAndAwaitIndicate(
+            frame = C1Protocol.buildGetSessionsFrame(startSessionId),
+            expectedOpcodes = setOf(C1Protocol.ResponseOpcode.GET_SESSIONS_CONFIRM),
+            label = "会话列表",
+        ).map { C1Protocol.parseSessions(it) }
+
     @Suppress("DEPRECATION")
     private suspend fun readCharacteristicRaw(characteristic: BluetoothGattCharacteristic?, label: String): Result<ByteArray> {
         val g = gatt ?: return Result.failure(IllegalStateException("未连接"))

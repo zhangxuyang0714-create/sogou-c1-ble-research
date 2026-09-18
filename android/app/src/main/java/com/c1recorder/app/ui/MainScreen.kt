@@ -25,6 +25,7 @@ import com.c1recorder.app.ble.C1ClientState
 import com.c1recorder.app.ble.ScanState
 import com.c1recorder.app.ble.ScannedDevice
 import com.c1recorder.app.data.C1Device
+import com.c1recorder.app.data.RecordingSession
 import com.c1recorder.app.protocol.C1Protocol
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -34,6 +35,7 @@ fun MainScreen(viewModel: MainViewModel, onRequestPermissions: () -> Unit) {
     val device by viewModel.device.collectAsState()
     val scanState by viewModel.scanState.collectAsState()
     val discoveredDevices by viewModel.discoveredDevices.collectAsState()
+    val sessions by viewModel.sessions.collectAsState()
 
     DisposableEffect(Unit) {
         onDispose { viewModel.stopScan() }
@@ -54,6 +56,12 @@ fun MainScreen(viewModel: MainViewModel, onRequestPermissions: () -> Unit) {
             Button(onClick = viewModel::disconnect, enabled = connectionState != C1ClientState.Disconnected) {
                 Text("断开连接")
             }
+
+            SessionListSection(
+                sessions = sessions,
+                enabled = connectionState == C1ClientState.Ready,
+                onRefresh = viewModel::refreshSessions,
+            )
 
             ScanSection(
                 scanState = scanState,
@@ -96,6 +104,37 @@ private fun formatStorage(freeKB: Long?, totalKB: Long?): String {
     val freeGB = freeKB / 1024.0 / 1024.0
     val totalGB = totalKB / 1024.0 / 1024.0
     return "%.2f / %.2f GB 可用".format(freeGB, totalGB)
+}
+
+@Composable
+private fun SessionListSection(
+    sessions: List<RecordingSession>,
+    enabled: Boolean,
+    onRefresh: () -> Unit,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text("录音列表 (${sessions.size})", style = MaterialTheme.typography.titleMedium)
+        Button(onClick = onRefresh, enabled = enabled) {
+            Text("刷新录音列表")
+        }
+        LazyColumn(modifier = Modifier.fillMaxWidth()) {
+            items(sessions, key = { it.sessionId }) { session ->
+                Card(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        Text("时长: ${formatDuration(session.durationMs)}", style = MaterialTheme.typography.bodyLarge)
+                        Text("sessionId: 0x%08x".format(session.sessionId), style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+            }
+        }
+    }
+}
+
+private fun formatDuration(durationMs: Long): String {
+    val totalSeconds = durationMs / 1000
+    val minutes = totalSeconds / 60
+    val seconds = totalSeconds % 60
+    return "%d分%02d秒".format(minutes, seconds)
 }
 
 @Composable

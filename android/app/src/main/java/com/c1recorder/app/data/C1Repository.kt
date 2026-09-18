@@ -34,7 +34,8 @@ interface C1Repository {
  * firmware, battery, state and storage and publishes them as a C1Device —
  * that's the only orchestration needed since every read is independently
  * safe to call once, in sequence (the GATT connection allows only one
- * outstanding operation at a time).
+ * outstanding operation at a time). Session list pagination (refreshSessions)
+ * is a separate, explicitly user-triggered operation — see MainScreen.
  */
 class DefaultC1Repository(
     private val client: C1BleClient,
@@ -57,7 +58,10 @@ class DefaultC1Repository(
             client.state.collect { state ->
                 when (state) {
                     C1ClientState.Ready -> refreshDeviceInfo()
-                    C1ClientState.Disconnected -> _device.value = null
+                    C1ClientState.Disconnected -> {
+                        _device.value = null
+                        _sessions.value = emptyList()
+                    }
                     else -> Unit
                 }
             }
@@ -74,7 +78,36 @@ class DefaultC1Repository(
     }
 
     override suspend fun refreshSessions() {
-        // Intentionally unimplemented: getSessions lands in Phase 6.
+        if (client.state.value != C1ClientState.Ready) return
+
+        // Pagination algorithm ported verbatim from the verified reference
+        // c1_local/test_getfiles_real_confirmed.py: page with the previous
+        // page's last sessionId as the next start, dedup by sessionId, stop
+        // when a page is empty, doesn't advance, or adds nothing new.
+        val collected = LinkedHashMap<Long, C1Protocol.SessionEntry>()
+        var startSessionId = 0L
+        for (page in 0 until MAX_PAGES) {
+            val entries = client.getSessions(startSessionId).getOrNull() ?: break
+            if (entries.isEmpty()) break
+            val newOnes = entries.filter { it.sessionId !in collected }
+            newOnes.forEach { collected[it.sessionId] = it }
+            val lastSessionId = entries.last().sessionId
+            if (lastSessionId == startSessionId || newOnes.isEmpty()) break
+            startSessionId = lastSessionId
+            if (collected.size >= MAX_SESSIONS) break
+        }
+
+        _sessions.value = collected.values.map {
+            RecordingSession(sessionId = it.sessionId, durationMs = it.durationMs, thirdFieldUnknown = it.thirdFieldUnknown)
+        }
+    }
+
+    private companion object {
+        // Safety caps carried over from the verified reference script, not
+        // protocol facts — the device has never been observed to need more
+        // than a handful of pages.
+        const val MAX_PAGES = 10
+        const val MAX_SESSIONS = 20
     }
 
     private suspend fun refreshDeviceInfo() {
