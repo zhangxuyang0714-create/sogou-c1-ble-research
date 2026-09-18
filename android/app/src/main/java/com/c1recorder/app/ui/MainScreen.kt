@@ -112,7 +112,8 @@ private fun C1ClientState.label(): String = when (this) {
     C1ClientState.Disconnected -> "未连接"
     C1ClientState.Connecting -> "连接中"
     C1ClientState.DiscoveringServices -> "发现服务中"
-    C1ClientState.Connected -> "已连接"
+    C1ClientState.PerformingHandshake -> "握手中"
+    C1ClientState.Ready -> "已就绪"
     is C1ClientState.ConnectionFailed -> "连接失败: $reason"
     is C1ClientState.MissingCharacteristics -> "缺少必要特征值: ${missing.joinToString()}"
 }

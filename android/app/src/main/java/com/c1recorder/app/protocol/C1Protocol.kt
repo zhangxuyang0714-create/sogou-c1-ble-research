@@ -60,6 +60,11 @@ object C1Protocol {
         val FILE_TRIGGER: UUID = uuid16("b002")
     }
 
+    object Descriptor {
+        /** Standard BLE Client Characteristic Configuration Descriptor — not C1-specific, but kept here so no UUID is hardcoded elsewhere. */
+        val CLIENT_CHARACTERISTIC_CONFIG: UUID = uuid16("2902")
+    }
+
     /** Every command frame, in both directions, is exactly this many bytes. */
     const val FRAME_SIZE = 20
 

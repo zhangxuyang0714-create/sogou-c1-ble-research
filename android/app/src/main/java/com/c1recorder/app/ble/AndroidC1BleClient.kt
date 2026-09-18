@@ -4,6 +4,8 @@ import android.Manifest
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothGatt
 import android.bluetooth.BluetoothGattCallback
+import android.bluetooth.BluetoothGattCharacteristic
+import android.bluetooth.BluetoothGattDescriptor
 import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothProfile
 import android.content.Context
@@ -12,16 +14,19 @@ import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import androidx.core.content.ContextCompat
+import com.c1recorder.app.protocol.C1Protocol
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
 private const val TAG = "C1Ble"
 private const val CONNECT_TIMEOUT_MS = 15_000L
+private const val HANDSHAKE_TIMEOUT_MS = 10_000L
 
 class AndroidC1BleClient(
     private val context: Context,
     private val connectTimeoutMs: Long = CONNECT_TIMEOUT_MS,
+    private val handshakeTimeoutMs: Long = HANDSHAKE_TIMEOUT_MS,
 ) : C1BleClient {
 
     private val bluetoothManager = context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
@@ -30,12 +35,16 @@ class AndroidC1BleClient(
     override val state: StateFlow<C1ClientState> = _state.asStateFlow()
 
     private var gatt: BluetoothGatt? = null
+    private var cmdWriteCharacteristic: BluetoothGattCharacteristic? = null
+    private var cmdIndicateCharacteristic: BluetoothGattCharacteristic? = null
+
     private val timeoutHandler = Handler(Looper.getMainLooper())
     private var timeoutRunnable: Runnable? = null
 
     private fun hasPermission(permission: String): Boolean =
         ContextCompat.checkSelfPermission(context, permission) == PackageManager.PERMISSION_GRANTED
 
+    @Suppress("DEPRECATION")
     private val callback = object : BluetoothGattCallback() {
         override fun onConnectionStateChange(g: BluetoothGatt, status: Int, newState: Int) {
             when (newState) {
@@ -65,15 +74,83 @@ class AndroidC1BleClient(
                 cleanupAfterFailure("discoverServices status=$status")
                 return
             }
-            val discoveredUuids = g.services.flatMap { it.characteristics }.map { it.uuid }.toSet()
-            val missing = RequiredCharacteristics.findMissing(discoveredUuids)
-            _state.value = if (missing.isEmpty()) {
-                C1ClientState.Connected
-            } else {
+            val byUuid = g.services.flatMap { it.characteristics }.associateBy { it.uuid }
+            val missing = RequiredCharacteristics.findMissing(byUuid.keys)
+            if (missing.isNotEmpty()) {
                 Log.w(TAG, "missing characteristics: $missing")
-                C1ClientState.MissingCharacteristics(missing)
+                _state.value = C1ClientState.MissingCharacteristics(missing)
+                return
+            }
+            cmdWriteCharacteristic = byUuid.getValue(C1Protocol.Characteristic.CMD_WRITE)
+            cmdIndicateCharacteristic = byUuid.getValue(C1Protocol.Characteristic.CMD_INDICATE)
+            startHandshake(g)
+        }
+
+        override fun onDescriptorWrite(g: BluetoothGatt, descriptor: BluetoothGattDescriptor, status: Int) {
+            if (descriptor.uuid != C1Protocol.Descriptor.CLIENT_CHARACTERISTIC_CONFIG) return
+            if (status != BluetoothGatt.GATT_SUCCESS) {
+                cleanupAfterFailure("订阅通知失败 status=$status")
+                return
+            }
+            val writeChar = cmdWriteCharacteristic ?: return cleanupAfterFailure("内部错误: cmdWrite 特征值丢失")
+            val packet = C1Protocol.buildCapabilityInitFrame()
+            val sent = try {
+                writeChar.value = packet
+                g.writeCharacteristic(writeChar)
+            } catch (e: SecurityException) {
+                cleanupAfterFailure("缺少 BLUETOOTH_CONNECT 权限")
+                return
+            }
+            if (!sent) {
+                cleanupAfterFailure("发送握手包失败")
             }
         }
+
+        override fun onCharacteristicWrite(g: BluetoothGatt, characteristic: BluetoothGattCharacteristic, status: Int) {
+            if (characteristic.uuid != C1Protocol.Characteristic.CMD_WRITE) return
+            if (_state.value != C1ClientState.PerformingHandshake) return
+            if (status != BluetoothGatt.GATT_SUCCESS) {
+                cleanupAfterFailure("握手包写入失败 status=$status")
+            }
+            // else: wait for the indicate on cmdIndicate — that's the actual handshake ack.
+        }
+
+        @Suppress("DEPRECATION", "OVERRIDE_DEPRECATION")
+        override fun onCharacteristicChanged(g: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
+            if (characteristic.uuid != C1Protocol.Characteristic.CMD_INDICATE) return
+            if (_state.value != C1ClientState.PerformingHandshake) return
+            val opcode = C1Protocol.parseResponseOpcode(characteristic.value ?: ByteArray(0))
+            Log.i(TAG, "handshake ack, opcode=$opcode")
+            clearTimeout()
+            _state.value = C1ClientState.Ready
+        }
+    }
+
+    // minSdk 31 lacks the API 33+ writeDescriptor(descriptor, value) overload.
+    @Suppress("DEPRECATION")
+    private fun startHandshake(g: BluetoothGatt) {
+        val indicateChar = cmdIndicateCharacteristic ?: return cleanupAfterFailure("内部错误: cmdIndicate 特征值丢失")
+        _state.value = C1ClientState.PerformingHandshake
+        try {
+            if (!g.setCharacteristicNotification(indicateChar, true)) {
+                cleanupAfterFailure("无法启用通知")
+                return
+            }
+            val cccd = indicateChar.getDescriptor(C1Protocol.Descriptor.CLIENT_CHARACTERISTIC_CONFIG)
+                ?: return cleanupAfterFailure("设备缺少 CCCD 描述符")
+            cccd.value = BluetoothGattDescriptor.ENABLE_INDICATION_VALUE
+            if (!g.writeDescriptor(cccd)) {
+                cleanupAfterFailure("订阅通知请求失败")
+                return
+            }
+        } catch (e: SecurityException) {
+            cleanupAfterFailure("缺少 BLUETOOTH_CONNECT 权限")
+            return
+        }
+        timeoutRunnable = Runnable {
+            Log.w(TAG, "handshake timeout")
+            cleanupAfterFailure("握手超时")
+        }.also { timeoutHandler.postDelayed(it, handshakeTimeoutMs) }
     }
 
     // The Executor/BluetoothGattConnectionSettings connectGatt overload that
@@ -133,6 +210,8 @@ class AndroidC1BleClient(
             Log.w(TAG, "disconnect/close denied", e)
         }
         gatt = null
+        cmdWriteCharacteristic = null
+        cmdIndicateCharacteristic = null
     }
 
     private fun clearTimeout() {

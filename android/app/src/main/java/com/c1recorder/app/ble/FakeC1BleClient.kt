@@ -10,7 +10,8 @@ import java.util.UUID
  * states a real GATT stack could reach on its own (Connecting, Disconnected);
  * the rest of the state machine is driven explicitly via simulate* calls so
  * tests can assert each transition, mirroring the real callback sequence
- * connect -> onConnectionStateChange(CONNECTED) -> onServicesDiscovered.
+ * connect -> onConnectionStateChange(CONNECTED) -> onServicesDiscovered ->
+ * onDescriptorWrite (CCCD) -> onCharacteristicChanged (handshake ack).
  */
 class FakeC1BleClient : C1BleClient {
     private val _state = MutableStateFlow<C1ClientState>(C1ClientState.Disconnected)
@@ -37,10 +38,15 @@ class FakeC1BleClient : C1BleClient {
         if (_state.value != C1ClientState.DiscoveringServices) return
         val missing = RequiredCharacteristics.findMissing(discoveredCharacteristics)
         _state.value = if (missing.isEmpty()) {
-            C1ClientState.Connected
+            C1ClientState.PerformingHandshake
         } else {
             C1ClientState.MissingCharacteristics(missing)
         }
+    }
+
+    fun simulateHandshakeAcked() {
+        if (_state.value != C1ClientState.PerformingHandshake) return
+        _state.value = C1ClientState.Ready
     }
 
     fun simulateConnectionFailed(reason: String) {

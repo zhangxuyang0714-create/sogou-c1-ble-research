@@ -19,14 +19,35 @@ class FakeC1BleClientTest {
     }
 
     @Test
-    fun fullHappyPath_reachesConnectedWithAllCharacteristics() {
+    fun servicesDiscovered_withAllCharacteristics_movesToPerformingHandshake() {
         val client = FakeC1BleClient()
 
         client.connect("AA:BB:CC:DD:EE:FF")
         client.simulateConnected()
         client.simulateServicesDiscovered(allRequiredUuids)
 
-        assertEquals(C1ClientState.Connected, client.state.value)
+        assertEquals(C1ClientState.PerformingHandshake, client.state.value)
+    }
+
+    @Test
+    fun fullHappyPath_reachesReadyAfterHandshakeAck() {
+        val client = FakeC1BleClient()
+
+        client.connect("AA:BB:CC:DD:EE:FF")
+        client.simulateConnected()
+        client.simulateServicesDiscovered(allRequiredUuids)
+        client.simulateHandshakeAcked()
+
+        assertEquals(C1ClientState.Ready, client.state.value)
+    }
+
+    @Test
+    fun simulateHandshakeAcked_whileNotPerformingHandshake_isIgnored() {
+        val client = FakeC1BleClient()
+
+        client.simulateHandshakeAcked()
+
+        assertEquals(C1ClientState.Disconnected, client.state.value)
     }
 
     @Test
@@ -67,6 +88,7 @@ class FakeC1BleClientTest {
         client.connect("AA:BB:CC:DD:EE:FF")
         client.simulateConnected()
         client.simulateServicesDiscovered(allRequiredUuids)
+        client.simulateHandshakeAcked()
 
         client.disconnect()
 

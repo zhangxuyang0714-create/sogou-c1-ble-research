@@ -5,15 +5,18 @@ import kotlinx.coroutines.flow.StateFlow
 import java.util.UUID
 
 /**
- * GATT connection lifecycle only: connect, discover services, confirm the
- * characteristics this app needs are present. No reads/writes yet — those
- * start in Phase 4 (capability handshake) and Phase 5 (device info).
+ * Connection lifecycle through the mandatory capability handshake. Per
+ * docs/FINAL-investigation-summary.md, the handshake must be sent before any
+ * other read/write gets a response, so the client performs it automatically
+ * right after service discovery — there is no usable "connected but not
+ * handshaken" state to expose. Only Ready is safe for Phase 5+ reads/writes.
  */
 sealed interface C1ClientState {
     data object Disconnected : C1ClientState
     data object Connecting : C1ClientState
     data object DiscoveringServices : C1ClientState
-    data object Connected : C1ClientState
+    data object PerformingHandshake : C1ClientState
+    data object Ready : C1ClientState
     data class ConnectionFailed(val reason: String) : C1ClientState
     data class MissingCharacteristics(val missing: List<String>) : C1ClientState
 }
