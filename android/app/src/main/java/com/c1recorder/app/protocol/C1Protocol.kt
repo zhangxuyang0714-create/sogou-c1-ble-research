@@ -16,6 +16,11 @@ object C1Protocol {
 
     private fun uuid16(short: String): UUID = UUID.fromString("0000$short-0000-1000-8000-00805f9b34fb")
 
+    /** Fixed identity facts about this specific device, confirmed during investigation. */
+    object Identity {
+        const val DEVICE_NAME = "搜狗AI录音笔"
+    }
+
     object Service {
         val BATTERY: UUID = uuid16("180f")
         val VENDOR_CMD: UUID = uuid16("1910")
