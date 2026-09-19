@@ -82,4 +82,17 @@ class FakeC1BleClient : C1BleClient {
 
     override suspend fun getSessions(startSessionId: Long): Result<List<C1Protocol.SessionEntry>> =
         fakeSessionPages[startSessionId] ?: Result.success(emptyList())
+
+    // --- C1 Hardware Capability Test fakes ---
+    var fakeStartRealtime: Result<C1Protocol.StartConfirm> = Result.success(C1Protocol.StartConfirm(sessionId = 0x1L, field2 = 0, recordType = C1Protocol.RecordType.COMMON))
+    var fakePauseRecord: Result<C1Protocol.RecordStatusEvent> = Result.success(C1Protocol.RecordStatusEvent(sessionId = 0x1L, field2 = 0))
+    var fakeStopRecord: Result<C1Protocol.RecordStatusEvent> = Result.success(C1Protocol.RecordStatusEvent(sessionId = 0x1L, field2 = 0))
+    var fakeGetFiles: Result<List<C1Protocol.FileEntry>> = Result.success(emptyList())
+    var fakeAttemptDownload: Result<DownloadAttempt> = Result.success(DownloadAttempt(headerOk = null, bytesReceived = 0, tail = null, computedCrc = null))
+
+    override suspend fun startRealtime(recordType: Int): Result<C1Protocol.StartConfirm> = fakeStartRealtime
+    override suspend fun pauseRecord(): Result<C1Protocol.RecordStatusEvent> = fakePauseRecord
+    override suspend fun stopRecord(): Result<C1Protocol.RecordStatusEvent> = fakeStopRecord
+    override suspend fun getFiles(sessionId: Long, recordType: Int): Result<List<C1Protocol.FileEntry>> = fakeGetFiles
+    override suspend fun attemptDownload(sessionId: Long, fileId: Int, start: Long, end: Long, recordType: Int): Result<DownloadAttempt> = fakeAttemptDownload
 }

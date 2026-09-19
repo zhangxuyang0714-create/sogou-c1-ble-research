@@ -2,6 +2,7 @@ package com.c1recorder.app.protocol
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -99,5 +100,122 @@ class C1ProtocolTest {
         assertEquals(1_048_576L, info?.freeKB)
         assertEquals(0L, info?.bytesPerSecond)
         assertEquals(false, info?.isFull)
+    }
+
+    // --- Hardware Capability Test additions (Tasks 1/2/3/5) ---
+
+    @Test
+    fun startRealtimeFrame_encodesOpcode10AndRecordType() {
+        val frame = C1Protocol.buildStartRealtimeFrame(C1Protocol.RecordType.COMMON)
+        assertEquals("0a 00 01 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00", hex(frame))
+    }
+
+    @Test
+    fun pauseAndStopFrames_areBareOpcodesWithNoParams() {
+        assertEquals("03 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00", hex(C1Protocol.buildPauseRecordFrame()))
+        assertEquals("02 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00", hex(C1Protocol.buildStopRecordFrame()))
+    }
+
+    @Test
+    fun getFilesFrame_encodesSessionIdAndRecordType() {
+        val frame = C1Protocol.buildGetFilesFrame(0x67d1acb0, C1Protocol.RecordType.COMMON)
+        assertEquals("07 00 b0 ac d1 67 01 00 00 00 00 00 00 00 00 00 00 00 00 00", hex(frame))
+    }
+
+    @Test
+    fun downloadFrame_encodesAllFiveFieldsInOrder() {
+        val frame = C1Protocol.buildDownloadFrame(sessionId = 0x67d1acb0, fileId = 1, start = 0, end = 160, recordType = C1Protocol.RecordType.COMMON)
+        assertEquals("08 00 b0 ac d1 67 01 00 00 00 00 00 a0 00 00 00 01 00 00 00", hex(frame))
+    }
+
+    @Test
+    fun stopDownloadFrame_isBareOpcode9() {
+        assertEquals("09 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00", hex(C1Protocol.buildStopDownloadFrame()))
+    }
+
+    @Test
+    fun parseStartConfirm_decodesSessionIdField2AndRecordType() {
+        val data = ByteArray(11)
+        C1Protocol.writeLeShort(data, 0, C1Protocol.ResponseOpcode.START_CNF)
+        C1Protocol.writeLeInt(data, 2, 0x67d1acb0)
+        C1Protocol.writeLeInt(data, 6, 42)
+        data[10] = C1Protocol.RecordType.COMMON.toByte()
+
+        val confirm = C1Protocol.parseStartConfirm(data)
+
+        assertEquals(0x67d1acb0L, confirm?.sessionId)
+        assertEquals(42L, confirm?.field2)
+        assertEquals(1, confirm?.recordType)
+    }
+
+    @Test
+    fun parseStartConfirm_zeroSessionIdMeansNotActuallyStarted() {
+        val data = ByteArray(11) // all zero, including sessionId
+        assertEquals(0L, C1Protocol.parseStartConfirm(data)?.sessionId)
+    }
+
+    @Test
+    fun parseRecordStatusEvent_decodesSessionIdAndField2() {
+        val data = ByteArray(8)
+        C1Protocol.writeLeShort(data, 0, C1Protocol.ResponseOpcode.STOP_IND)
+        C1Protocol.writeLeInt(data, 2, 0x67d1acb0)
+        C1Protocol.writeLeShort(data, 6, 5)
+
+        val event = C1Protocol.parseRecordStatusEvent(data)
+
+        assertEquals(0x67d1acb0L, event?.sessionId)
+        assertEquals(5L, event?.field2)
+    }
+
+    @Test
+    fun parseFiles_excludesTheNoFileSentinel() {
+        val data = ByteArray(14)
+        C1Protocol.writeLeShort(data, 0, C1Protocol.ResponseOpcode.GET_FILES_CONFIRM)
+        C1Protocol.writeLeShort(data, 2, 0xFFFF)
+        C1Protocol.writeLeInt(data, 4, 0)
+
+        assertTrue(C1Protocol.parseFiles(data).isEmpty())
+    }
+
+    @Test
+    fun parseFiles_decodesARealFileEntry() {
+        val data = ByteArray(8)
+        C1Protocol.writeLeShort(data, 0, C1Protocol.ResponseOpcode.GET_FILES_CONFIRM)
+        C1Protocol.writeLeShort(data, 2, 1)
+        C1Protocol.writeLeInt(data, 4, 160)
+
+        val files = C1Protocol.parseFiles(data)
+
+        assertEquals(1, files.size)
+        assertEquals(1, files[0].fileId)
+        assertEquals(160L, files[0].size)
+    }
+
+    @Test
+    fun parseFileHeaderOk_readsSingleByteFlag() {
+        assertEquals(true, C1Protocol.parseFileHeaderOk(byteArrayOf(0x0b, 0x00, 0x01)))
+        assertEquals(false, C1Protocol.parseFileHeaderOk(byteArrayOf(0x0b, 0x00, 0x00)))
+        assertNull(C1Protocol.parseFileHeaderOk(byteArrayOf(0x0b, 0x00)))
+    }
+
+    @Test
+    fun parseFileTail_usesTheDeclaredCrcLengthNotAFixedTwoBytes() {
+        // eod=1, crcLen=2, crc16=0xe1f0 (little-endian: f0 e1)
+        val data = byteArrayOf(0x0c, 0x00, 0x01, 0x02, 0xf0.toByte(), 0xe1.toByte())
+        val tail = C1Protocol.parseFileTail(data)
+        assertEquals(0xe1f0, tail?.crc16)
+        assertEquals(1, tail?.eod)
+    }
+
+    // Crc16: known-answer vectors computed independently in Python from the
+    // same transcribed algorithm (com/sogou/crc/CRC16Util.java), not just
+    // re-derived from this Kotlin implementation.
+    @Test
+    fun crc16_matchesIndependentlyComputedVectors() {
+        assertEquals(0xFFFF, C1Protocol.Crc16.calc(ByteArray(0)))
+        assertEquals(0xE1F0, C1Protocol.Crc16.calc(byteArrayOf(0x00)))
+        assertEquals(0xFF00, C1Protocol.Crc16.calc(byteArrayOf(0xFF.toByte())))
+        assertEquals(0x29B1, C1Protocol.Crc16.calc("123456789".toByteArray(Charsets.US_ASCII)))
+        assertEquals(0xC241, C1Protocol.Crc16.calc(ByteArray(10) { it.toByte() }))
     }
 }

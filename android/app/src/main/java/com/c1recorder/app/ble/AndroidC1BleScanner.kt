@@ -39,6 +39,7 @@ class AndroidC1BleScanner(
     private val scanCallback = object : ScanCallback() {
         override fun onScanResult(callbackType: Int, result: ScanResult) {
             val name = readDeviceNameOrNull(result)
+            Log.d(TAG, "scan result: name=$name address=${result.device.address} rssi=${result.rssi}")
             _discoveredDevices.update { ScanResultReducer.accept(it, name, result.device.address, result.rssi) }
         }
 

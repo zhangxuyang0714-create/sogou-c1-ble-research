@@ -5,9 +5,12 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -19,6 +22,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.c1recorder.app.ble.C1ClientState
@@ -36,6 +42,7 @@ fun MainScreen(viewModel: MainViewModel, onRequestPermissions: () -> Unit) {
     val scanState by viewModel.scanState.collectAsState()
     val discoveredDevices by viewModel.discoveredDevices.collectAsState()
     val sessions by viewModel.sessions.collectAsState()
+    val capabilityTestLog by viewModel.capabilityTestLog.collectAsState()
 
     DisposableEffect(Unit) {
         onDispose { viewModel.stopScan() }
@@ -48,11 +55,15 @@ fun MainScreen(viewModel: MainViewModel, onRequestPermissions: () -> Unit) {
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
-                .padding(16.dp),
+                .padding(16.dp)
+                .verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             Text("连接状态: ${connectionState.label()}", style = MaterialTheme.typography.titleMedium)
             DeviceInfoSection(device)
+            Button(onClick = viewModel::refreshDeviceInfo, enabled = connectionState == C1ClientState.Ready) {
+                Text("刷新设备信息 (含 D005)")
+            }
             Button(onClick = viewModel::disconnect, enabled = connectionState != C1ClientState.Disconnected) {
                 Text("断开连接")
             }
@@ -61,6 +72,18 @@ fun MainScreen(viewModel: MainViewModel, onRequestPermissions: () -> Unit) {
                 sessions = sessions,
                 enabled = connectionState == C1ClientState.Ready,
                 onRefresh = viewModel::refreshSessions,
+            )
+
+            CapabilityTestSection(
+                enabled = connectionState == C1ClientState.Ready,
+                latestSessionId = sessions.maxByOrNull { it.sessionId }?.sessionId,
+                log = capabilityTestLog,
+                onStart = viewModel::testStartRealtime,
+                onPause = viewModel::testPauseRecord,
+                onStop = viewModel::testStopRecord,
+                onGetFiles = { viewModel.testGetFiles(it) },
+                onAttemptDownload = { sessionId -> viewModel.testAttemptDownload(sessionId, fileId = 1, start = 0, end = 160) },
+                onClearLog = viewModel::clearCapabilityTestLog,
             )
 
             ScanSection(
@@ -117,7 +140,7 @@ private fun SessionListSection(
         Button(onClick = onRefresh, enabled = enabled) {
             Text("刷新录音列表")
         }
-        LazyColumn(modifier = Modifier.fillMaxWidth()) {
+        LazyColumn(modifier = Modifier.fillMaxWidth().heightIn(max = 300.dp)) {
             items(sessions, key = { it.sessionId }) { session ->
                 Card(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
                     Column(modifier = Modifier.padding(12.dp)) {
@@ -135,6 +158,70 @@ private fun formatDuration(durationMs: Long): String {
     val minutes = totalSeconds / 60
     val seconds = totalSeconds % 60
     return "%d分%02d秒".format(minutes, seconds)
+}
+
+/**
+ * docs/ANDROID-HARDWARE-CAPABILITY-TEST.md — investigative controls, not part
+ * of the confirmed v1 feature set. GetFiles/download always act on the
+ * newest known session (highest sessionId — sessionId is a Unix timestamp,
+ * see Task 6 in the doc).
+ *
+ * Collapsed by default: regression-isolation testing found that rendering
+ * this section's buttons (even idle/untapped) correlates with BLE scan
+ * result delivery failing intermittently on at least one test device. The
+ * mechanism isn't confirmed, so instead of guessing at a deeper fix, this
+ * keeps the section's normal-state footprint down to a single toggle row —
+ * the buttons only exist in the composition while expanded, and expanding
+ * is something the user does deliberately when they're about to run a
+ * capability test, not something that happens to be on screen every time
+ * scanning is used.
+ */
+@Composable
+private fun CapabilityTestSection(
+    enabled: Boolean,
+    latestSessionId: Long?,
+    log: List<String>,
+    onStart: () -> Unit,
+    onPause: () -> Unit,
+    onStop: () -> Unit,
+    onGetFiles: (Long) -> Unit,
+    onAttemptDownload: (Long) -> Unit,
+    onClearLog: () -> Unit,
+) {
+    var expanded by remember { mutableStateOf(false) }
+
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Button(onClick = { expanded = !expanded }) {
+            Text(if (expanded) "收起硬件能力测试" else "展开硬件能力测试")
+        }
+
+        if (expanded) {
+            Text(
+                latestSessionId?.let { "最新 session: 0x%08x".format(it) } ?: "尚无 session（先刷新录音列表）",
+                style = MaterialTheme.typography.bodySmall,
+            )
+            Button(onClick = onStart, enabled = enabled) { Text("开始录音 (startRealtime)") }
+            Button(onClick = onPause, enabled = enabled) { Text("暂停 (pauseRecord)") }
+            Button(onClick = onStop, enabled = enabled) { Text("停止 (stopRecord)") }
+            Button(onClick = { latestSessionId?.let(onGetFiles) }, enabled = enabled && latestSessionId != null) {
+                Text("获取文件 (getFiles, 最新session)")
+            }
+            Button(onClick = { latestSessionId?.let(onAttemptDownload) }, enabled = enabled && latestSessionId != null) {
+                Text("尝试下载 (attemptDownload, 最新session)")
+            }
+            Button(onClick = onClearLog) { Text("清空日志") }
+
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(modifier = Modifier.padding(12.dp)) {
+                    if (log.isEmpty()) {
+                        Text("（无日志）", style = MaterialTheme.typography.bodySmall)
+                    } else {
+                        log.forEach { Text(it, style = MaterialTheme.typography.bodySmall) }
+                    }
+                }
+            }
+        }
+    }
 }
 
 @Composable
@@ -162,7 +249,7 @@ private fun ScanSection(
         }
         Text("点击设备进行连接", style = MaterialTheme.typography.bodySmall)
 
-        LazyColumn(modifier = Modifier.fillMaxWidth()) {
+        LazyColumn(modifier = Modifier.fillMaxWidth().heightIn(max = 300.dp)) {
             items(discoveredDevices, key = { it.address }) { device ->
                 Card(
                     modifier = Modifier

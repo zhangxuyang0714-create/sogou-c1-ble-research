@@ -21,6 +21,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withTimeoutOrNull
+import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.util.concurrent.TimeoutException
 
@@ -58,6 +59,12 @@ class AndroidC1BleClient(
     private var pendingRead: CancellableContinuation<Result<ByteArray>>? = null
     private var pendingIndicate: CancellableContinuation<Result<ByteArray>>? = null
     private var pendingIndicateExpectedOpcodes: Set<Int> = emptySet()
+    private var pendingDescriptorWrite: CancellableContinuation<Boolean>? = null
+
+    // Capability-test only (attemptDownload): B001 carries raw, un-framed
+    // file bytes via notify — collected here while a download is in flight.
+    private var collectingDownloadData = false
+    private val downloadBuffer = ByteArrayOutputStream()
 
     private fun hasPermission(permission: String): Boolean =
         ContextCompat.checkSelfPermission(context, permission) == PackageManager.PERMISSION_GRANTED
@@ -110,21 +117,31 @@ class AndroidC1BleClient(
 
         override fun onDescriptorWrite(g: BluetoothGatt, descriptor: BluetoothGattDescriptor, status: Int) {
             if (descriptor.uuid != C1Protocol.Descriptor.CLIENT_CHARACTERISTIC_CONFIG) return
-            if (status != BluetoothGatt.GATT_SUCCESS) {
-                cleanupAfterFailure("订阅通知失败 status=$status")
-                return
-            }
-            val writeChar = cmdWriteCharacteristic ?: return cleanupAfterFailure("内部错误: cmdWrite 特征值丢失")
-            val packet = C1Protocol.buildCapabilityInitFrame()
-            val sent = try {
-                writeChar.value = packet
-                g.writeCharacteristic(writeChar)
-            } catch (e: SecurityException) {
-                cleanupAfterFailure("缺少 BLUETOOTH_CONNECT 权限")
-                return
-            }
-            if (!sent) {
-                cleanupAfterFailure("发送握手包失败")
+            when (descriptor.characteristic?.uuid) {
+                C1Protocol.Characteristic.CMD_INDICATE -> {
+                    if (status != BluetoothGatt.GATT_SUCCESS) {
+                        cleanupAfterFailure("订阅通知失败 status=$status")
+                        return
+                    }
+                    val writeChar = cmdWriteCharacteristic ?: return cleanupAfterFailure("内部错误: cmdWrite 特征值丢失")
+                    val packet = C1Protocol.buildCapabilityInitFrame()
+                    val sent = try {
+                        writeChar.value = packet
+                        g.writeCharacteristic(writeChar)
+                    } catch (e: SecurityException) {
+                        cleanupAfterFailure("缺少 BLUETOOTH_CONNECT 权限")
+                        return
+                    }
+                    if (!sent) {
+                        cleanupAfterFailure("发送握手包失败")
+                    }
+                }
+                else -> {
+                    // Any other CCCD write (currently: B001 notify subscribe for attemptDownload) is awaited via pendingDescriptorWrite.
+                    val cont = pendingDescriptorWrite
+                    pendingDescriptorWrite = null
+                    cont?.resume(status == BluetoothGatt.GATT_SUCCESS, onCancellation = null)
+                }
             }
         }
 
@@ -151,6 +168,13 @@ class AndroidC1BleClient(
 
         @Suppress("DEPRECATION", "OVERRIDE_DEPRECATION")
         override fun onCharacteristicChanged(g: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
+            if (characteristic.uuid == C1Protocol.Characteristic.FILE_NOTIFY) {
+                // B001: raw file bytes, not opcode-framed — see attemptDownload.
+                if (collectingDownloadData) {
+                    downloadBuffer.write(characteristic.value ?: ByteArray(0))
+                }
+                return
+            }
             if (characteristic.uuid != C1Protocol.Characteristic.CMD_INDICATE) return
             val data = characteristic.value ?: ByteArray(0)
             when (_state.value) {
@@ -287,6 +311,72 @@ class AndroidC1BleClient(
             label = "会话列表",
         ).map { C1Protocol.parseSessions(it) }
 
+    override suspend fun startRealtime(recordType: Int): Result<C1Protocol.StartConfirm> =
+        sendCommandAndAwaitIndicate(
+            frame = C1Protocol.buildStartRealtimeFrame(recordType),
+            expectedOpcodes = setOf(C1Protocol.ResponseOpcode.START_CNF),
+            label = "开始录音",
+        ).mapCatching { C1Protocol.parseStartConfirm(it) ?: error("开始录音响应格式异常") }
+
+    override suspend fun pauseRecord(): Result<C1Protocol.RecordStatusEvent> =
+        sendCommandAndAwaitIndicate(
+            frame = C1Protocol.buildPauseRecordFrame(),
+            expectedOpcodes = setOf(C1Protocol.ResponseOpcode.PAUSE_IND),
+            label = "暂停录音",
+        ).mapCatching { C1Protocol.parseRecordStatusEvent(it) ?: error("暂停响应格式异常") }
+
+    override suspend fun stopRecord(): Result<C1Protocol.RecordStatusEvent> =
+        sendCommandAndAwaitIndicate(
+            frame = C1Protocol.buildStopRecordFrame(),
+            expectedOpcodes = setOf(C1Protocol.ResponseOpcode.STOP_IND),
+            label = "停止录音",
+        ).mapCatching { C1Protocol.parseRecordStatusEvent(it) ?: error("停止响应格式异常") }
+
+    override suspend fun getFiles(sessionId: Long, recordType: Int): Result<List<C1Protocol.FileEntry>> =
+        sendCommandAndAwaitIndicate(
+            frame = C1Protocol.buildGetFilesFrame(sessionId, recordType),
+            expectedOpcodes = setOf(C1Protocol.ResponseOpcode.GET_FILES_CONFIRM),
+            label = "文件列表",
+        ).map { C1Protocol.parseFiles(it) }
+
+    override suspend fun attemptDownload(sessionId: Long, fileId: Int, start: Long, end: Long, recordType: Int): Result<DownloadAttempt> {
+        val g = gatt ?: return Result.failure(IllegalStateException("未连接"))
+        if (_state.value != C1ClientState.Ready) return Result.failure(IllegalStateException("设备未就绪"))
+        if (pendingRead != null || pendingIndicate != null) {
+            return Result.failure(IllegalStateException("已有操作进行中"))
+        }
+
+        val fileNotifyChar = g.services.flatMap { it.characteristics }
+            .firstOrNull { it.uuid == C1Protocol.Characteristic.FILE_NOTIFY }
+            ?: return Result.failure(IllegalStateException("设备缺少 B001 特征值"))
+
+        subscribeNotify(g, fileNotifyChar, "B001").onFailure { return Result.failure(it) }
+
+        downloadBuffer.reset()
+        collectingDownloadData = true
+        try {
+            val headerResult = sendCommandAndAwaitIndicate(
+                frame = C1Protocol.buildDownloadFrame(sessionId, fileId, start, end, recordType),
+                expectedOpcodes = setOf(C1Protocol.ResponseOpcode.FILE_HEADER),
+                label = "下载-HEADER",
+            )
+            val headerOk = headerResult.getOrNull()?.let { C1Protocol.parseFileHeaderOk(it) }
+            if (headerResult.isFailure || headerOk != true) {
+                return Result.success(DownloadAttempt(headerOk = headerOk, bytesReceived = 0, tail = null, computedCrc = null))
+            }
+
+            val tailResult = awaitIndicate(setOf(C1Protocol.ResponseOpcode.FILE_TAIL), "下载-TAIL")
+            val tail = tailResult.getOrNull()?.let { C1Protocol.parseFileTail(it) }
+            val collected = downloadBuffer.toByteArray()
+            val computedCrc = if (tail != null) C1Protocol.Crc16.calc(collected) else null
+
+            return Result.success(DownloadAttempt(headerOk = true, bytesReceived = collected.size, tail = tail, computedCrc = computedCrc))
+        } finally {
+            collectingDownloadData = false
+            sendStopDownloadBestEffort(g)
+        }
+    }
+
     @Suppress("DEPRECATION")
     private suspend fun readCharacteristicRaw(characteristic: BluetoothGattCharacteristic?, label: String): Result<ByteArray> {
         val g = gatt ?: return Result.failure(IllegalStateException("未连接"))
@@ -351,6 +441,64 @@ class AndroidC1BleClient(
         return result
     }
 
+    /** Waits for the next matching indicate without writing anything first — for a second/later response to a single earlier write (e.g. TAIL after HEADER). */
+    @Suppress("DEPRECATION")
+    private suspend fun awaitIndicate(expectedOpcodes: Set<Int>, label: String): Result<ByteArray> {
+        if (_state.value != C1ClientState.Ready) return Result.failure(IllegalStateException("设备未就绪"))
+        if (pendingIndicate != null) return Result.failure(IllegalStateException("已有操作进行中"))
+
+        val result = withTimeoutOrNull(operationTimeoutMs) {
+            suspendCancellableCoroutine { cont ->
+                pendingIndicate = cont
+                pendingIndicateExpectedOpcodes = expectedOpcodes
+                cont.invokeOnCancellation { pendingIndicate = null }
+            }
+        }
+        if (result == null) {
+            pendingIndicate = null
+            return Result.failure(TimeoutException("$label 超时"))
+        }
+        return result
+    }
+
+    @Suppress("DEPRECATION")
+    private suspend fun subscribeNotify(g: BluetoothGatt, characteristic: BluetoothGattCharacteristic, label: String): Result<Unit> {
+        val result = withTimeoutOrNull(operationTimeoutMs) {
+            suspendCancellableCoroutine { cont ->
+                pendingDescriptorWrite = cont
+                try {
+                    val cccd = characteristic.getDescriptor(C1Protocol.Descriptor.CLIENT_CHARACTERISTIC_CONFIG)
+                    if (!g.setCharacteristicNotification(characteristic, true) || cccd == null) {
+                        pendingDescriptorWrite = null
+                        cont.resume(false, onCancellation = null)
+                        return@suspendCancellableCoroutine
+                    }
+                    cccd.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+                    if (!g.writeDescriptor(cccd)) {
+                        pendingDescriptorWrite = null
+                        cont.resume(false, onCancellation = null)
+                    }
+                } catch (e: SecurityException) {
+                    pendingDescriptorWrite = null
+                    cont.resume(false, onCancellation = null)
+                }
+                cont.invokeOnCancellation { pendingDescriptorWrite = null }
+            }
+        }
+        return if (result == true) Result.success(Unit) else Result.failure(IOException("$label 订阅失败或超时"))
+    }
+
+    @Suppress("DEPRECATION")
+    private fun sendStopDownloadBestEffort(g: BluetoothGatt) {
+        val writeChar = cmdWriteCharacteristic ?: return
+        try {
+            writeChar.value = C1Protocol.buildStopDownloadFrame()
+            g.writeCharacteristic(writeChar)
+        } catch (e: SecurityException) {
+            Log.w(TAG, "stopDownload write denied", e)
+        }
+    }
+
     private fun cleanupAfterFailure(reason: String) {
         clearTimeout()
         closeGatt()
@@ -382,6 +530,15 @@ class AndroidC1BleClient(
         val indicateCont = pendingIndicate
         pendingIndicate = null
         indicateCont?.let { safeResume(it, Result.failure(IOException("连接已断开"))) }
+
+        val descriptorCont = pendingDescriptorWrite
+        pendingDescriptorWrite = null
+        try {
+            descriptorCont?.resume(false) { _, _, _ -> }
+        } catch (e: IllegalStateException) {
+            // Already resumed/cancelled from the GATT callback thread — fine, ignore.
+        }
+        collectingDownloadData = false
     }
 
     private fun safeResume(cont: CancellableContinuation<Result<ByteArray>>, value: Result<ByteArray>) {

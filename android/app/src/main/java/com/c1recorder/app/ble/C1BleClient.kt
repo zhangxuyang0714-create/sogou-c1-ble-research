@@ -38,6 +38,39 @@ interface C1BleClient {
 
     /** One page of the session list, starting at startSessionId (0 = first page). Callers paginate; see DefaultC1Repository.refreshSessions. */
     suspend fun getSessions(startSessionId: Long): Result<List<C1Protocol.SessionEntry>>
+
+    // --- C1 Hardware Capability Test (docs/ANDROID-HARDWARE-CAPABILITY-TEST.md) ---
+    // Investigative operations, not part of the confirmed v1 feature set.
+    // Real success/failure judged by the official app's own criteria (e.g.
+    // sessionId != 0 for startRealtime), not merely "a response arrived".
+
+    suspend fun startRealtime(recordType: Int = C1Protocol.RecordType.COMMON): Result<C1Protocol.StartConfirm>
+    suspend fun pauseRecord(): Result<C1Protocol.RecordStatusEvent>
+    suspend fun stopRecord(): Result<C1Protocol.RecordStatusEvent>
+    suspend fun getFiles(sessionId: Long, recordType: Int = C1Protocol.RecordType.COMMON): Result<List<C1Protocol.FileEntry>>
+
+    /**
+     * The full getFiles-must-already-have-succeeded download chain: subscribe
+     * B001, send DOWNLOAD_FILE, wait HEADER, collect raw B001 notifies until
+     * TAIL, verify CRC, send DOWNLOAD_STOP. See DownloadAttempt for how a
+     * partial failure is distinguished from a full success.
+     */
+    suspend fun attemptDownload(sessionId: Long, fileId: Int, start: Long, end: Long, recordType: Int = C1Protocol.RecordType.COMMON): Result<DownloadAttempt>
+}
+
+/**
+ * Full diagnostic record of one attemptDownload() call — deliberately not
+ * collapsed into a single success/failure boolean, so a caller (and
+ * docs/ANDROID-HARDWARE-CAPABILITY-TEST.md) can tell exactly which stage
+ * failed instead of a generic "download failed".
+ */
+data class DownloadAttempt(
+    val headerOk: Boolean?,
+    val bytesReceived: Int,
+    val tail: C1Protocol.FileTail?,
+    val computedCrc: Int?,
+) {
+    val crcMatches: Boolean? get() = if (tail != null && computedCrc != null) tail.crc16 == computedCrc else null
 }
 
 /**

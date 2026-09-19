@@ -22,7 +22,7 @@ class MainActivity : ComponentActivity() {
     private val bleClient by lazy { AndroidC1BleClient(applicationContext) }
 
     private val viewModel: MainViewModel by viewModels {
-        MainViewModel.Factory(DefaultC1Repository(bleClient), scanner)
+        MainViewModel.Factory(DefaultC1Repository(bleClient), scanner, bleClient)
     }
 
     private val requestBlePermissions = registerForActivityResult(

@@ -26,6 +26,9 @@ interface C1Repository {
     fun connect(address: String)
     fun disconnect()
     suspend fun refreshSessions()
+
+    /** Re-reads SN/firmware/battery/state/storage on demand — used by the capability test to check D005 before/after an experiment (docs/ANDROID-HARDWARE-CAPABILITY-TEST.md). */
+    suspend fun refreshDeviceInfo()
 }
 
 /**
@@ -110,7 +113,7 @@ class DefaultC1Repository(
         const val MAX_SESSIONS = 20
     }
 
-    private suspend fun refreshDeviceInfo() {
+    override suspend fun refreshDeviceInfo() {
         val address = connectedAddress ?: return
         val sn = client.readSerialNumber().getOrNull()
         val firmware = client.readFirmwareVersion().getOrNull()
