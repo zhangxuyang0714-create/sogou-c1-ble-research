@@ -89,10 +89,44 @@ class FakeC1BleClient : C1BleClient {
     var fakeStopRecord: Result<C1Protocol.RecordStatusEvent> = Result.success(C1Protocol.RecordStatusEvent(sessionId = 0x1L, field2 = 0))
     var fakeGetFiles: Result<List<C1Protocol.FileEntry>> = Result.success(emptyList())
     var fakeAttemptDownload: Result<DownloadAttempt> = Result.success(DownloadAttempt(headerOk = null, bytesReceived = 0, tail = null, computedCrc = null))
+    var fakeDownloadRecording: Result<BleDownloadResult>? = null
 
     override suspend fun startRealtime(recordType: Int): Result<C1Protocol.StartConfirm> = fakeStartRealtime
     override suspend fun pauseRecord(): Result<C1Protocol.RecordStatusEvent> = fakePauseRecord
     override suspend fun stopRecord(): Result<C1Protocol.RecordStatusEvent> = fakeStopRecord
     override suspend fun getFiles(sessionId: Long, recordType: Int): Result<List<C1Protocol.FileEntry>> = fakeGetFiles
     override suspend fun attemptDownload(sessionId: Long, fileId: Int, start: Long, end: Long, recordType: Int): Result<DownloadAttempt> = fakeAttemptDownload
+
+    override suspend fun downloadRecording(
+        sessionId: Long,
+        fileId: Int,
+        durationMs: Long,
+        destinationDir: java.io.File,
+        onProgress: ((BleDownloadProgress) -> Unit)?,
+        onStage: ((DownloadStage) -> Unit)?,
+    ): Result<BleDownloadResult> {
+        val fakeResult = fakeDownloadRecording
+        if (fakeResult != null) {
+            if (fakeResult.isSuccess) {
+                onStage?.invoke(DownloadStage.VERIFYING)
+                onStage?.invoke(DownloadStage.DECODING)
+            }
+            return fakeResult
+        }
+
+        val dummyAvc = java.io.File(destinationDir, "session_${sessionId}_${fileId}.avc")
+        val dummyWav = java.io.File(destinationDir, "session_${sessionId}_${fileId}.wav")
+        return Result.success(
+            BleDownloadResult(
+                sessionId = sessionId,
+                fileId = fileId,
+                rawAvcFile = dummyAvc,
+                wavFile = dummyWav,
+                bytesReceived = 0L,
+                packetCount = 0,
+                crc16 = null,
+                crcVerified = true,
+            )
+        )
+    }
 }

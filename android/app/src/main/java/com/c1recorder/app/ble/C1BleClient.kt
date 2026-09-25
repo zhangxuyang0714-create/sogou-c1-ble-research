@@ -56,7 +56,57 @@ interface C1BleClient {
      * partial failure is distinguished from a full success.
      */
     suspend fun attemptDownload(sessionId: Long, fileId: Int, start: Long, end: Long, recordType: Int = C1Protocol.RecordType.COMMON): Result<DownloadAttempt>
+
+    /**
+     * Formal end-to-end BLE audio download:
+     * 1. Multi-packet getFiles collection -> real fileId
+     * 2. Subscribe B001 notification
+     * 3. Opcode 8 (DOWNLOAD_FILE) -> Opcode 11 (FILE_HEADER, data[2] == 0)
+     * 4. Receive raw B001 bytes for as long as it takes, with no idle cutoff
+     * 5. Opcode 12 (FILE_TAIL) is mandatory: no tail before the hard timeout
+     *    is always a Result.failure, never a fabricated success
+     * 6. CRC16 mismatch against the tail is also always a Result.failure —
+     *    crcVerified on the returned BleDownloadResult is therefore always
+     *    true; it only exists to be displayed, not decided, by the caller
+     * 7. Reconstruct .avc and decode (mono — see impl doc comment for the
+     *    real-device evidence) to a 16kHz 16-bit WAV file
+     *
+     * onProgress fires only during step 4 (byte-level receive progress);
+     * onStage fires for the two work phases after the stream ends (5-6 is
+     * Verifying, 7 is Decoding) so the UI can show real stage state instead
+     * of a byte percentage that stalls once the stream itself is done.
+     */
+    suspend fun downloadRecording(
+        sessionId: Long,
+        fileId: Int,
+        durationMs: Long,
+        destinationDir: java.io.File,
+        onProgress: ((BleDownloadProgress) -> Unit)? = null,
+        onStage: ((DownloadStage) -> Unit)? = null,
+    ): Result<BleDownloadResult>
 }
+
+enum class DownloadStage { VERIFYING, DECODING }
+
+data class BleDownloadProgress(
+    val sessionId: Long,
+    val fileId: Int,
+    val bytesReceived: Long,
+    val totalBytesExpected: Long,
+    val packetCount: Int,
+    val percent: Int,
+)
+
+data class BleDownloadResult(
+    val sessionId: Long,
+    val fileId: Int,
+    val rawAvcFile: java.io.File,
+    val wavFile: java.io.File,
+    val bytesReceived: Long,
+    val packetCount: Int,
+    val crc16: Int?,
+    val crcVerified: Boolean,
+)
 
 /**
  * Full diagnostic record of one attemptDownload() call — deliberately not

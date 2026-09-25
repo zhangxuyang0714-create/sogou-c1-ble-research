@@ -22,9 +22,60 @@ class MainViewModel(
     val connectionState = repository.connectionState
     val device = repository.device
     val sessions = repository.sessions
+    val downloadStates = repository.downloadStates
+
+    private var mediaPlayer: android.media.MediaPlayer? = null
+    private val _playingSessionId = MutableStateFlow<Long?>(null)
+    val playingSessionId: StateFlow<Long?> = _playingSessionId.asStateFlow()
 
     val scanState = scanner.scanState
     val discoveredDevices = scanner.discoveredDevices
+
+    fun downloadSession(session: com.c1recorder.app.data.RecordingSession, destinationDir: java.io.File) {
+        viewModelScope.launch {
+            repository.downloadSession(session, destinationDir)
+        }
+    }
+
+    fun checkLocalFiles(destinationDir: java.io.File) {
+        repository.checkLocalFiles(destinationDir)
+    }
+
+    fun togglePlayAudio(sessionId: Long, wavFile: java.io.File) {
+        if (_playingSessionId.value == sessionId) {
+            stopAudio()
+            return
+        }
+
+        try {
+            stopAudio()
+            val player = android.media.MediaPlayer().apply {
+                setDataSource(wavFile.absolutePath)
+                prepare()
+                setOnCompletionListener {
+                    stopAudio()
+                }
+                start()
+            }
+            mediaPlayer = player
+            _playingSessionId.value = sessionId
+        } catch (e: Exception) {
+            android.util.Log.e("MainViewModel", "Playback error for session $sessionId", e)
+            stopAudio()
+        }
+    }
+
+    fun stopAudio() {
+        try {
+            mediaPlayer?.stop()
+            mediaPlayer?.release()
+        } catch (e: Exception) {
+            // Ignored
+        } finally {
+            mediaPlayer = null
+            _playingSessionId.value = null
+        }
+    }
 
     fun startScan() {
         scanner.startScan()
@@ -42,8 +93,19 @@ class MainViewModel(
         repository.disconnect()
     }
 
+    private val _isRefreshingSessions = MutableStateFlow(false)
+    val isRefreshingSessions: StateFlow<Boolean> = _isRefreshingSessions.asStateFlow()
+
     fun refreshSessions() {
-        viewModelScope.launch { repository.refreshSessions() }
+        if (_isRefreshingSessions.value) return
+        viewModelScope.launch {
+            _isRefreshingSessions.value = true
+            try {
+                repository.refreshSessions()
+            } finally {
+                _isRefreshingSessions.value = false
+            }
+        }
     }
 
     fun refreshDeviceInfo() {
@@ -62,8 +124,6 @@ class MainViewModel(
     }
 
     fun testStartRealtime() = runCapabilityTest("startRealtime(Common)") { bleClient.startRealtime() }
-
-    fun testPauseRecord() = runCapabilityTest("pauseRecord()") { bleClient.pauseRecord() }
 
     fun testStopRecord() = runCapabilityTest("stopRecord()") { bleClient.stopRecord() }
 
@@ -86,6 +146,7 @@ class MainViewModel(
     }
 
     override fun onCleared() {
+        stopAudio()
         scanner.stopScan()
         repository.disconnect()
     }

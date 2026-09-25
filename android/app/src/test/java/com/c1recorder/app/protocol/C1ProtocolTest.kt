@@ -1,5 +1,6 @@
 package com.c1recorder.app.protocol
 
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -192,9 +193,34 @@ class C1ProtocolTest {
     }
 
     @Test
+    fun parseFileFrame_handlesStreamingAndSentinel() {
+        // Packet 1: 0a00 ffff ... (placeholder only, no sentinel)
+        val packet1 = ByteArray(14)
+        C1Protocol.writeLeShort(packet1, 0, C1Protocol.ResponseOpcode.GET_FILES_CONFIRM)
+        C1Protocol.writeLeShort(packet1, 2, 0xFFFF)
+        C1Protocol.writeLeShort(packet1, 8, 0xFFFF)
+        val (entries1, sentinel1) = C1Protocol.parseFileFrame(packet1)
+        assertTrue(entries1.isEmpty())
+        assertEquals(false, sentinel1)
+
+        // Packet 2: 0a00 0100 f4f60000 00000000 ... (fileId=1, duration=63220ms, then fileId=0 sentinel)
+        val packet2 = ByteArray(14)
+        C1Protocol.writeLeShort(packet2, 0, C1Protocol.ResponseOpcode.GET_FILES_CONFIRM)
+        C1Protocol.writeLeShort(packet2, 2, 1)
+        C1Protocol.writeLeInt(packet2, 4, 63220L)
+        C1Protocol.writeLeShort(packet2, 8, 0) // sentinel
+        val (entries2, sentinel2) = C1Protocol.parseFileFrame(packet2)
+        assertEquals(1, entries2.size)
+        assertEquals(1, entries2[0].fileId)
+        assertEquals(63220L, entries2[0].size)
+        assertEquals(true, sentinel2)
+    }
+
+    @Test
     fun parseFileHeaderOk_readsSingleByteFlag() {
-        assertEquals(true, C1Protocol.parseFileHeaderOk(byteArrayOf(0x0b, 0x00, 0x01)))
-        assertEquals(false, C1Protocol.parseFileHeaderOk(byteArrayOf(0x0b, 0x00, 0x00)))
+        // Confirmed on real C1 hardware: data[2] == 0 indicates SUCCESS (0b00 00...)
+        assertEquals(true, C1Protocol.parseFileHeaderOk(byteArrayOf(0x0b, 0x00, 0x00)))
+        assertEquals(false, C1Protocol.parseFileHeaderOk(byteArrayOf(0x0b, 0x00, 0x01)))
         assertNull(C1Protocol.parseFileHeaderOk(byteArrayOf(0x0b, 0x00)))
     }
 
@@ -217,5 +243,63 @@ class C1ProtocolTest {
         assertEquals(0xFF00, C1Protocol.Crc16.calc(byteArrayOf(0xFF.toByte())))
         assertEquals(0x29B1, C1Protocol.Crc16.calc("123456789".toByteArray(Charsets.US_ASCII)))
         assertEquals(0xC241, C1Protocol.Crc16.calc(ByteArray(10) { it.toByte() }))
+    }
+
+    // parseB001Packet: ground truth is StickWorker.handleData() in the
+    // decompiled vendor APK (com/sogou/teemo/translatepen/manager/
+    // StickStuff.kt) — [3-byte LE seq][1-byte len][payload]. An earlier
+    // version of AndroidC1BleClient treated B001 as headerless raw bytes,
+    // which fed the wrong data into the CRC (0x63E9 locally vs. the
+    // device's real value) — these tests pin the correct frame shape.
+
+    @Test
+    fun parseB001Packet_extractsSeqAndPayload() {
+        // seq=1 (LE 01 00 00), len=80, then 80 payload bytes.
+        val payload = ByteArray(80) { it.toByte() }
+        val packet = byteArrayOf(0x01, 0x00, 0x00, 80.toByte()) + payload
+        val parsed = C1Protocol.parseB001Packet(packet)
+        assertEquals(1, parsed?.seq)
+        assertArrayEquals(payload, parsed?.payload)
+    }
+
+    @Test
+    fun parseB001Packet_seqZeroIsTheEndOfStreamSentinel() {
+        val packet = byteArrayOf(0x00, 0x00, 0x00, 0x01, 0x2a)
+        val parsed = C1Protocol.parseB001Packet(packet)
+        assertEquals(0, parsed?.seq) // caller decides seq==0 means "stop", not this function
+    }
+
+    @Test
+    fun parseB001Packet_returnsNullForTruncatedOrMalformedPackets() {
+        assertNull(C1Protocol.parseB001Packet(byteArrayOf(0x01, 0x00))) // shorter than the 4-byte header itself
+        // declares len=80 but only 10 bytes actually follow the header
+        assertNull(C1Protocol.parseB001Packet(byteArrayOf(0x01, 0x00, 0x00, 80.toByte()) + ByteArray(10)))
+    }
+
+    @Test
+    fun parseB001Packet_reconstructsExactBytesAcrossAFullDownload() {
+        // Same shape as a real ground-truth recording (RECORD/20260919/
+        // 13_30_38.AVC on the device's own USB storage: 538 packets of 80
+        // bytes = 43040 bytes, 5.38s mono @ 16kHz/16bit, 4x AVC:PCM ratio).
+        // Content here is synthetic (deterministic, not the user's real
+        // audio) — this only proves the packet framing/reassembly is
+        // lossless, not anything about the audio itself.
+        val originalBytes = ByteArray(538 * 80) { (it % 251).toByte() }
+        val packets = (1..538).map { i ->
+            val seq = i
+            val offset = (i - 1) * 80
+            byteArrayOf((seq and 0xFF).toByte(), ((seq shr 8) and 0xFF).toByte(), ((seq shr 16) and 0xFF).toByte(), 80.toByte()) +
+                originalBytes.copyOfRange(offset, offset + 80)
+        }
+
+        val reconstructed = java.io.ByteArrayOutputStream()
+        for (packet in packets) {
+            val parsed = C1Protocol.parseB001Packet(packet)!!
+            assertEquals(80, parsed.payload.size)
+            reconstructed.write(parsed.payload)
+        }
+
+        assertArrayEquals(originalBytes, reconstructed.toByteArray())
+        assertEquals(43040, reconstructed.size())
     }
 }

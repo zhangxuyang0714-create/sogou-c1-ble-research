@@ -43,17 +43,23 @@ object C1Protocol {
         val SERIAL_NUMBER: UUID = uuid16("d003")
         val STATE: UUID = uuid16("d005")
 
-        /** Write-only; ack observed but effect on the device unverified. Not used in v1. */
+        /** StickProtocol.SET_TIME = 6. Raw 4-byte LE Unix Epoch Seconds written directly here upon BLE connection. */
         val SYNC_TIME: UUID = uuid16("d007")
 
         /** Always reads constant 0x02; meaning unknown. Not used in v1. */
         val UNKNOWN_D00A: UUID = uuid16("d00a")
 
         /**
-         * Raw file-download bytes, notify — NOT opcode-framed like CMD_INDICATE.
-         * C1GattCallbackHandler.onCharacteristicChanged passes its payload
-         * straight to onFileReceive() with no header at all. Used by
-         * C1BleClient.attemptDownload (see docs/ANDROID-HARDWARE-CAPABILITY-TEST.md).
+         * File-download bytes, notify — NOT opcode-framed like CMD_INDICATE
+         * (C1GattCallbackHandler.onCharacteristicChanged passes the payload
+         * straight to onFileReceive() with no CMD-style opcode header). Each
+         * notification IS still its own [3-byte LE seq][1-byte len][payload]
+         * frame one level down, though: see StickWorker.handleData() in the
+         * decompiled APK (com/sogou/teemo/translatepen/manager/StickStuff.kt)
+         * — seq 0 is an end-of-stream sentinel, a repeated seq is a duplicate
+         * to drop, and len (normally 80) bounds the real payload. Used by
+         * C1BleClient.downloadRecording/attemptDownload (see
+         * docs/ANDROID-HARDWARE-CAPABILITY-TEST.md).
          */
         val FILE_NOTIFY: UUID = uuid16("b001")
 
@@ -177,6 +183,13 @@ object C1Protocol {
 
     fun buildStopDownloadFrame(): ByteArray = buildFrame(Opcode.DOWNLOAD_STOP)
 
+    /** Builds raw 4-byte LE Unix Epoch Seconds written directly to D007 (charSyncTime). */
+    fun buildSyncTimePayload(epochSeconds: Long = System.currentTimeMillis() / 1000L): ByteArray {
+        val buf = ByteArray(4)
+        writeLeInt(buf, 0, epochSeconds)
+        return buf
+    }
+
     private fun buildFrame(opcode: Int, params: ByteArray = ByteArray(0)): ByteArray {
         val buf = ByteArray(FRAME_SIZE)
         writeLeShort(buf, 0, opcode)
@@ -241,23 +254,34 @@ object C1Protocol {
 
     /**
      * Response to Opcode.GET_SESSIONS: opcode header at [0,2), then 12-byte
-     * entries (sessionId 4B LE + durationMs 4B LE + unknown 4B LE) until a
-     * sessionId of 0 or the buffer runs out. Matches
-     * c1_local/test_getfiles_real_confirmed.py's parse_sessions, verified
-     * against 12 real USB WAV files' durations.
+     * entries (sessionId 4B LE + durationMs 4B LE + recordType 4B LE) until a
+     * sessionId of 0 or the buffer runs out.
      */
-    fun parseSessions(data: ByteArray): List<SessionEntry> {
+    fun parseSessions(data: ByteArray): List<SessionEntry> = parseSessionFrame(data).first
+
+    /**
+     * Parses a single GET_SESSIONS_CONFIRM frame.
+     * Returns a pair of:
+     * - list of valid (non-zero sessionId) SessionEntry items
+     * - boolean flag hasSentinel: true if a sessionId == 0 sentinel was encountered,
+     *   denoting that the device has completed streaming all sessions.
+     */
+    fun parseSessionFrame(data: ByteArray): Pair<List<SessionEntry>, Boolean> {
         val entries = mutableListOf<SessionEntry>()
         var offset = 2
+        var hasSentinel = false
         while (offset + 12 <= data.size) {
             val sessionId = leLong(data, offset, 4)
             val durationMs = leLong(data, offset + 4, 4)
-            val thirdField = leLong(data, offset + 8, 4)
-            if (sessionId == 0L) break
-            entries.add(SessionEntry(sessionId, durationMs, thirdField))
+            val recordType = leLong(data, offset + 8, 4)
+            if (sessionId == 0L) {
+                hasSentinel = true
+                break
+            }
+            entries.add(SessionEntry(sessionId, durationMs, recordType))
             offset += 12
         }
-        return entries
+        return Pair(entries, hasSentinel)
     }
 
     /**
@@ -294,27 +318,64 @@ object C1Protocol {
     data class FileEntry(val fileId: Int, val size: Long)
 
     /**
-     * Response to Opcode.GET_FILES: opcode header at [0,2), then up to two
-     * 6-byte entries (fileId 2B LE + size 4B LE) at [2,8) and [8,14).
-     * fileId == 65535 is the device's own documented "no file" sentinel and
-     * is excluded, not reported as an entry.
+     * Response to Opcode.GET_FILES (ResponseOpcode.GET_FILES_CONFIRM):
+     * Opcode header at [0,2), then 6-byte entries (fileId 2B LE + size/duration 4B LE).
+     * fileId == 0 is the sentinel marking end-of-stream.
+     * fileId == 0xFFFF is the dummy/placeholder entry on initial packet, to be ignored.
      */
-    fun parseFiles(data: ByteArray): List<FileEntry> {
+    fun parseFileFrame(data: ByteArray): Pair<List<FileEntry>, Boolean> {
         val entries = mutableListOf<FileEntry>()
         var offset = 2
-        while (offset + 6 <= data.size && offset <= 8) {
+        var hasSentinel = false
+        while (offset + 6 <= data.size) {
             val fileId = leInt(data, offset, 2)
             val size = leLong(data, offset + 2, 4)
-            if (fileId == 0) break
-            if (fileId != 0xFFFF) entries.add(FileEntry(fileId, size))
+            if (fileId == 0) {
+                hasSentinel = true
+                break
+            }
+            if (fileId != 0xFFFF) {
+                entries.add(FileEntry(fileId, size))
+            }
             offset += 6
         }
-        return entries
+        return Pair(entries, hasSentinel)
     }
 
-    /** Response to Opcode.DOWNLOAD_FILE's HEADER (ResponseOpcode.FILE_HEADER): a single meaningful byte at [2] — true means proceed. */
+    fun parseFiles(data: ByteArray): List<FileEntry> = parseFileFrame(data).first
+
+    /**
+     * One B001 (FILE_NOTIFY) raw-file-download packet:
+     * [3-byte LE seq][1-byte len][payload, `len` bytes — normally 80].
+     * seq == 0 is an end-of-stream sentinel (StickWorker.doBuffer in the
+     * decompiled vendor APK, com/sogou/teemo/translatepen/manager/
+     * StickStuff.kt) — it carries no real audio and must not be written to
+     * the reconstructed AVC stream. A repeated seq is a duplicate
+     * notification to drop (StickWorker.handleData: `if (seq == lastIndex)
+     * return`), not a second, different packet.
+     */
+    data class B001Packet(val seq: Int, val payload: ByteArray)
+
+    /**
+     * Parses one B001 notification. Returns null if it's too short to hold
+     * a header, or its declared len overruns the actual packet size
+     * (truncated/malformed notification) — callers should log and drop
+     * rather than throw.
+     */
+    fun parseB001Packet(data: ByteArray): B001Packet? {
+        if (data.size < 4) return null
+        val seq = leInt(data, 0, 3)
+        val len = data[3].toInt() and 0xFF
+        if (data.size < 4 + len) return null
+        return B001Packet(seq, data.copyOfRange(4, 4 + len))
+    }
+
+    /**
+     * Response to Opcode.DOWNLOAD_FILE's HEADER (ResponseOpcode.FILE_HEADER):
+     * data[2] == 0 indicates SUCCESS on real C1 hardware. Non-zero indicates error.
+     */
     fun parseFileHeaderOk(data: ByteArray): Boolean? =
-        if (data.size > 2) data[2] == 1.toByte() else null
+        if (data.size > 2) data[2] == 0.toByte() else null
 
     data class FileTail(val crc16: Int, val eod: Int)
 

@@ -26,3 +26,11 @@ logs/
 .trash/
 __pycache__/
 *.pyc
+
+# Proprietary Airoha CELT decoder taken from the vendor APK (JNI wrapper and
+# native libs) — not redistributable. See README for how to supply it locally.
+android/app/src/main/java/com/airoha/
+android/app/src/main/jniLibs/
+
+# Audio captured from a real device — private, never committed
+android/app/src/androidTest/assets/

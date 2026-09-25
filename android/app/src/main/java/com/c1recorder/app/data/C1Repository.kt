@@ -2,6 +2,7 @@ package com.c1recorder.app.data
 
 import com.c1recorder.app.ble.C1BleClient
 import com.c1recorder.app.ble.C1ClientState
+import com.c1recorder.app.ble.DownloadStage
 import com.c1recorder.app.protocol.C1Protocol
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
@@ -11,7 +12,10 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 /**
  * What the UI/ViewModel layer is allowed to know about the C1 device.
@@ -29,6 +33,10 @@ interface C1Repository {
 
     /** Re-reads SN/firmware/battery/state/storage on demand — used by the capability test to check D005 before/after an experiment (docs/ANDROID-HARDWARE-CAPABILITY-TEST.md). */
     suspend fun refreshDeviceInfo()
+
+    val downloadStates: StateFlow<Map<Long, SessionDownloadState>>
+    suspend fun downloadSession(session: RecordingSession, destinationDir: java.io.File)
+    fun checkLocalFiles(destinationDir: java.io.File)
 }
 
 /**
@@ -54,7 +62,11 @@ class DefaultC1Repository(
     private val _sessions = MutableStateFlow<List<RecordingSession>>(emptyList())
     override val sessions: StateFlow<List<RecordingSession>> = _sessions.asStateFlow()
 
+    private val _downloadStates = MutableStateFlow<Map<Long, SessionDownloadState>>(emptyMap())
+    override val downloadStates: StateFlow<Map<Long, SessionDownloadState>> = _downloadStates.asStateFlow()
+
     private var connectedAddress: String? = null
+    private val refreshMutex = Mutex()
 
     init {
         scope.launch {
@@ -83,34 +95,16 @@ class DefaultC1Repository(
     override suspend fun refreshSessions() {
         if (client.state.value != C1ClientState.Ready) return
 
-        // Pagination algorithm ported verbatim from the verified reference
-        // c1_local/test_getfiles_real_confirmed.py: page with the previous
-        // page's last sessionId as the next start, dedup by sessionId, stop
-        // when a page is empty, doesn't advance, or adds nothing new.
-        val collected = LinkedHashMap<Long, C1Protocol.SessionEntry>()
-        var startSessionId = 0L
-        for (page in 0 until MAX_PAGES) {
-            val entries = client.getSessions(startSessionId).getOrNull() ?: break
-            if (entries.isEmpty()) break
-            val newOnes = entries.filter { it.sessionId !in collected }
-            newOnes.forEach { collected[it.sessionId] = it }
-            val lastSessionId = entries.last().sessionId
-            if (lastSessionId == startSessionId || newOnes.isEmpty()) break
-            startSessionId = lastSessionId
-            if (collected.size >= MAX_SESSIONS) break
+        refreshMutex.withLock {
+            val entries = client.getSessions(0L).getOrNull() ?: return
+            _sessions.value = entries.map {
+                RecordingSession(
+                    sessionId = it.sessionId,
+                    durationMs = it.durationMs,
+                    thirdFieldUnknown = it.thirdFieldUnknown,
+                )
+            }.sortedByDescending { it.sessionId }
         }
-
-        _sessions.value = collected.values.map {
-            RecordingSession(sessionId = it.sessionId, durationMs = it.durationMs, thirdFieldUnknown = it.thirdFieldUnknown)
-        }
-    }
-
-    private companion object {
-        // Safety caps carried over from the verified reference script, not
-        // protocol facts — the device has never been observed to need more
-        // than a handful of pages.
-        const val MAX_PAGES = 10
-        const val MAX_SESSIONS = 20
     }
 
     override suspend fun refreshDeviceInfo() {
@@ -130,5 +124,109 @@ class DefaultC1Repository(
             totalStorageKB = storage?.totalKB,
             freeStorageKB = storage?.freeKB,
         )
+    }
+
+    override suspend fun downloadSession(session: RecordingSession, destinationDir: java.io.File) {
+        if (client.state.value != C1ClientState.Ready) {
+            _downloadStates.update { it + (session.sessionId to SessionDownloadState.Error(session.sessionId, "设备未连接或未就绪")) }
+            return
+        }
+
+        _downloadStates.update { it + (session.sessionId to SessionDownloadState.FetchingFiles(session.sessionId)) }
+
+        // 1. Fetch file list for this session
+        val filesResult = client.getFiles(session.sessionId)
+        val files = filesResult.getOrNull()
+        if (filesResult.isFailure || files == null) {
+            val err = filesResult.exceptionOrNull()?.message ?: "检索文件列表失败"
+            _downloadStates.update { it + (session.sessionId to SessionDownloadState.Error(session.sessionId, err)) }
+            return
+        }
+
+        val targetFile = files.firstOrNull { it.fileId > 0 && it.fileId != 0xFFFF }
+        if (targetFile == null) {
+            _downloadStates.update { it + (session.sessionId to SessionDownloadState.Error(session.sessionId, "未找到有效文件条目 (可能尚未在设备落盘)")) }
+            return
+        }
+
+        _downloadStates.update {
+            it + (session.sessionId to SessionDownloadState.Downloading(
+                sessionId = session.sessionId,
+                fileId = targetFile.fileId,
+                bytesReceived = 0L,
+                percent = 0,
+            ))
+        }
+
+        // 2. Download and decode audio
+        val durationMs = if (targetFile.size > 0) targetFile.size else session.durationMs
+        val downloadResult = client.downloadRecording(
+            sessionId = session.sessionId,
+            fileId = targetFile.fileId,
+            durationMs = durationMs,
+            destinationDir = destinationDir,
+            onProgress = { prog ->
+                _downloadStates.update {
+                    it + (session.sessionId to SessionDownloadState.Downloading(
+                        sessionId = session.sessionId,
+                        fileId = prog.fileId,
+                        bytesReceived = prog.bytesReceived,
+                        percent = prog.percent,
+                    ))
+                }
+            },
+            onStage = { stage ->
+                val newState = when (stage) {
+                    DownloadStage.VERIFYING -> SessionDownloadState.Verifying(session.sessionId)
+                    DownloadStage.DECODING -> SessionDownloadState.Decoding(session.sessionId)
+                }
+                _downloadStates.update { it + (session.sessionId to newState) }
+            },
+        )
+
+        downloadResult.fold(
+            onSuccess = { res ->
+                _downloadStates.update {
+                    it + (session.sessionId to SessionDownloadState.Completed(
+                        sessionId = session.sessionId,
+                        fileId = res.fileId,
+                        wavFile = res.wavFile,
+                        avcFile = res.rawAvcFile,
+                        durationMs = session.durationMs,
+                        crcVerified = res.crcVerified,
+                    ))
+                }
+            },
+            onFailure = { err ->
+                _downloadStates.update {
+                    it + (session.sessionId to SessionDownloadState.Error(
+                        sessionId = session.sessionId,
+                        message = err.message ?: "下载失败",
+                    ))
+                }
+            },
+        )
+    }
+
+    override fun checkLocalFiles(destinationDir: java.io.File) {
+        val sessionsList = _sessions.value
+        val map = _downloadStates.value.toMutableMap()
+        for (s in sessionsList) {
+            val wav = java.io.File(destinationDir, "session_${s.sessionId}_1.wav")
+            val avc = java.io.File(destinationDir, "session_${s.sessionId}_1.avc")
+            if (wav.exists() && wav.length() > 44) {
+                if (map[s.sessionId] !is SessionDownloadState.Downloading && map[s.sessionId] !is SessionDownloadState.FetchingFiles) {
+                    map[s.sessionId] = SessionDownloadState.Completed(
+                        sessionId = s.sessionId,
+                        fileId = 1,
+                        wavFile = wav,
+                        avcFile = avc,
+                        durationMs = s.durationMs,
+                        crcVerified = true,
+                    )
+                }
+            }
+        }
+        _downloadStates.value = map
     }
 }

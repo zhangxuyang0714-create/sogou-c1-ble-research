@@ -111,10 +111,18 @@ download(sessionId, fileId, start, end, recordType)  — opcode 8 (APP_RECORD_DO
 STICK_RECORD_FILE_HEADER (opcode 11)
   event.onHeader(data[2] == 1)  —— 只有 1 个有意义字节：是否成功，不含文件大小等元数据
   ↓
-B001 (UUID_CHAR_FILE_S2A) notify —— 裸数据，不走 opcode 解析！
-  C1GattCallbackHandler.onCharacteristicChanged 对 B001 直接调用
-  event.onFileReceive(rawBytes)，没有任何帧头
-  ↓ （可能多次 notify，累积拼接）
+B001 (UUID_CHAR_FILE_S2A) notify —— 不走 CMD_INDICATE 那套 opcode 解析
+  （C1GattCallbackHandler.onCharacteristicChanged 对 B001 直接调用
+  event.onFileReceive(rawBytes)，不经过 opcode 分发这一层）
+  ↓ 但 onFileReceive 往下一层（StickWorker.handleData，见
+  com/sogou/teemo/translatepen/manager/StickStuff.kt 反编译源码）
+  确认每条 notify 自己仍是一帧：[3字节LE seq][1字节len][payload]
+    seq==0：裸数据流结束哨兵（不代表下载成功，仍要等 FILE_TAIL）
+    seq==lastSeq：重复包，丢弃
+    payload = buffer[4 : 4+len]（len 通常=80）
+  【曾经在这里错误地把 B001 当成完全无帧头的裸字节直接拼接，
+  导致本地 CRC 用错了输入数据——已改回按这个真实帧结构解析】
+  ↓ （多次 notify，累积拼接 payload）
 STICK_RECORD_FILE_TAIL (opcode 12)
   eod = data[2]（1字节，end-of-data标志）
   crcLen = data[3]（1字节，CRC字段的字节数——不是固定2字节！）

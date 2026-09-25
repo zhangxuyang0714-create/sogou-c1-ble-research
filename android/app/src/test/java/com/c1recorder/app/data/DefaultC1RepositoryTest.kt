@@ -72,9 +72,10 @@ class DefaultC1RepositoryTest {
     private fun entry(sessionId: Long, durationMs: Long) = C1Protocol.SessionEntry(sessionId, durationMs, thirdFieldUnknown = 1)
 
     @Test
-    fun refreshSessions_singlePage_stopsWhenNextPageIsEmpty() = runBlocking {
+    fun refreshSessions_success_updatesSessionsAtomically() = runBlocking {
+        val entries = (1..25).map { entry(0x6aade000L + it, 1000L * it) }
         val client = FakeC1BleClient().apply {
-            fakeSessionPages = mapOf(0L to Result.success(listOf(entry(0x67d1acb0, 1740), entry(0x6aabb161, 12_000))))
+            fakeSessionPages = mapOf(0L to Result.success(entries))
         }
         val repository = DefaultC1Repository(client, Dispatchers.Unconfined)
         connectToReady(client, repository)
@@ -82,66 +83,31 @@ class DefaultC1RepositoryTest {
         repository.refreshSessions()
 
         val sessions = repository.sessions.value
-        assertEquals(2, sessions.size)
-        assertEquals(listOf(0x67d1acb0L, 0x6aabb161L), sessions.map { it.sessionId })
-        assertEquals(listOf(1740L, 12_000L), sessions.map { it.durationMs })
+        val expected = entries.sortedByDescending { it.sessionId }
+        assertEquals(25, sessions.size)
+        assertEquals(expected.map { it.sessionId }, sessions.map { it.sessionId })
+        assertEquals(expected.map { it.durationMs }, sessions.map { it.durationMs })
     }
 
     @Test
-    fun refreshSessions_paginatesUntilNextPageIsEmpty() = runBlocking {
-        val page1Last = 0x100L
-        val page2Last = 0x200L
+    fun refreshSessions_failure_preservesExistingSessions() = runBlocking {
+        val initialEntries = listOf(entry(0x100L, 2000L))
         val client = FakeC1BleClient().apply {
-            fakeSessionPages = mapOf(
-                0L to Result.success(listOf(entry(0x50, 1000), entry(page1Last, 2000))),
-                page1Last to Result.success(listOf(entry(0x150, 3000), entry(page2Last, 4000))),
-                // page2Last deliberately unconfigured -> defaults to empty page -> pagination stops
-            )
+            fakeSessionPages = mapOf(0L to Result.success(initialEntries))
         }
         val repository = DefaultC1Repository(client, Dispatchers.Unconfined)
         connectToReady(client, repository)
 
         repository.refreshSessions()
+        assertEquals(1, repository.sessions.value.size)
 
-        val sessions = repository.sessions.value
-        assertEquals(listOf(0x50L, page1Last, 0x150L, page2Last), sessions.map { it.sessionId })
-    }
-
-    @Test
-    fun refreshSessions_stopsWhenPageDoesNotAdvance() = runBlocking {
-        val stuckId = 0x100L
-        val client = FakeC1BleClient().apply {
-            fakeSessionPages = mapOf(
-                0L to Result.success(listOf(entry(0x50, 1000), entry(stuckId, 2000))),
-                // device echoes the same last sessionId again instead of advancing
-                stuckId to Result.success(listOf(entry(stuckId, 2000))),
-            )
-        }
-        val repository = DefaultC1Repository(client, Dispatchers.Unconfined)
-        connectToReady(client, repository)
-
+        // Now subsequent fetch fails
+        client.fakeSessionPages = mapOf(0L to Result.failure(IllegalStateException("stream timeout")))
         repository.refreshSessions()
 
-        assertEquals(listOf(0x50L, stuckId), repository.sessions.value.map { it.sessionId })
-    }
-
-    @Test
-    fun refreshSessions_stopsAtTwentySessionsEvenIfMorePagesExist() = runBlocking {
-        val page1Last = 0x100L
-        val page1 = (0 until 20).map { entry(it.toLong() + 1, 1000) } + entry(page1Last, 1000)
-        val client = FakeC1BleClient().apply {
-            fakeSessionPages = mapOf(
-                0L to Result.success(page1),
-                // never fetched: page1 alone already hits the cap
-                page1Last to Result.success(listOf(entry(0x999, 1000))),
-            )
-        }
-        val repository = DefaultC1Repository(client, Dispatchers.Unconfined)
-        connectToReady(client, repository)
-
-        repository.refreshSessions()
-
-        assertEquals(21, repository.sessions.value.size) // cap is checked after appending a page, not mid-page
+        // Should preserve previous sessions rather than clearing or corrupting
+        assertEquals(1, repository.sessions.value.size)
+        assertEquals(0x100L, repository.sessions.value.first().sessionId)
     }
 
     @Test
@@ -154,5 +120,61 @@ class DefaultC1RepositoryTest {
         repository.refreshSessions()
 
         assertTrue(repository.sessions.value.isEmpty())
+    }
+
+    // downloadSession: a downloadRecording() failure (timeout without
+    // FILE_TAIL, CRC mismatch, decode failure — see AndroidC1BleClient) must
+    // never be reported as Completed. This is the core property of the
+    // "don't fake success" fix: the UI can only ever show a real
+    // crcVerified=true Completed state, or an Error carrying the real reason.
+
+    @Test
+    fun downloadSession_bleFailure_reportsErrorNotCompleted() = runBlocking {
+        val client = FakeC1BleClient().apply {
+            fakeGetFiles = Result.success(listOf(com.c1recorder.app.protocol.C1Protocol.FileEntry(fileId = 1, size = 63220)))
+            fakeDownloadRecording = Result.failure(java.io.IOException("CRC 校验失败 (设备=0x1234, 本地计算=0x5678)，数据可能不完整或损坏，未生成文件"))
+        }
+        val repository = DefaultC1Repository(client, Dispatchers.Unconfined)
+        connectToReady(client, repository)
+
+        val session = RecordingSession(sessionId = 0x6aadf714L, durationMs = 63220, thirdFieldUnknown = 1)
+        repository.downloadSession(session, java.io.File("/tmp/does-not-need-to-exist"))
+
+        val state = repository.downloadStates.value[session.sessionId]
+        assertTrue("expected Error, got $state", state is SessionDownloadState.Error)
+        assertEquals(
+            "CRC 校验失败 (设备=0x1234, 本地计算=0x5678)，数据可能不完整或损坏，未生成文件",
+            (state as SessionDownloadState.Error).message,
+        )
+    }
+
+    @Test
+    fun downloadSession_success_marksCompletedWithCrcVerified() = runBlocking {
+        val wav = java.io.File("/tmp/session_x_1.wav")
+        val avc = java.io.File("/tmp/session_x_1.avc")
+        val client = FakeC1BleClient().apply {
+            fakeGetFiles = Result.success(listOf(com.c1recorder.app.protocol.C1Protocol.FileEntry(fileId = 1, size = 63220)))
+            fakeDownloadRecording = Result.success(
+                com.c1recorder.app.ble.BleDownloadResult(
+                    sessionId = 0x6aadf714L,
+                    fileId = 1,
+                    rawAvcFile = avc,
+                    wavFile = wav,
+                    bytesReceived = 505760,
+                    packetCount = 6322,
+                    crc16 = 0x1234,
+                    crcVerified = true,
+                ),
+            )
+        }
+        val repository = DefaultC1Repository(client, Dispatchers.Unconfined)
+        connectToReady(client, repository)
+
+        val session = RecordingSession(sessionId = 0x6aadf714L, durationMs = 63220, thirdFieldUnknown = 1)
+        repository.downloadSession(session, java.io.File("/tmp"))
+
+        val state = repository.downloadStates.value[session.sessionId]
+        assertTrue("expected Completed, got $state", state is SessionDownloadState.Completed)
+        assertTrue((state as SessionDownloadState.Completed).crcVerified)
     }
 }

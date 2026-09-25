@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.ui.Modifier
+import androidx.core.view.WindowCompat
 import com.c1recorder.app.ble.AndroidC1BleClient
 import com.c1recorder.app.ble.AndroidC1BleScanner
 import com.c1recorder.app.data.DefaultC1Repository
@@ -34,6 +35,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        WindowCompat.getInsetsController(window, window.decorView).isAppearanceLightStatusBars = true
         setContent {
             MaterialTheme {
                 Surface(modifier = Modifier.fillMaxSize()) {

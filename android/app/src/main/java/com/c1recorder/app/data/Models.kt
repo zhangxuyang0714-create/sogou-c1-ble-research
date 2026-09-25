@@ -22,3 +22,32 @@ data class RecordingSession(
     val durationMs: Long,
     val thirdFieldUnknown: Long,
 )
+
+sealed interface SessionDownloadState {
+    data object Idle : SessionDownloadState
+    data class FetchingFiles(val sessionId: Long) : SessionDownloadState
+    data class Downloading(
+        val sessionId: Long,
+        val fileId: Int,
+        val bytesReceived: Long,
+        val percent: Int,
+    ) : SessionDownloadState
+
+    /** CRC16 check against FILE_TAIL — mandatory, not advisory; a mismatch is reported as Error, never Completed. */
+    data class Verifying(val sessionId: Long) : SessionDownloadState
+
+    /** CELT decode + WAV write — the only stage after Verifying, so this covers both rather than inventing steps this app doesn't actually take separately. */
+    data class Decoding(val sessionId: Long) : SessionDownloadState
+    data class Completed(
+        val sessionId: Long,
+        val fileId: Int,
+        val wavFile: java.io.File,
+        val avcFile: java.io.File,
+        val durationMs: Long,
+        val crcVerified: Boolean,
+    ) : SessionDownloadState
+    data class Error(
+        val sessionId: Long,
+        val message: String,
+    ) : SessionDownloadState
+}
