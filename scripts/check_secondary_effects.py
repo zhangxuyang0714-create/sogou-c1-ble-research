@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Read-only follow-up: check d00a/d001/d003/d005/battery for any delayed
 effect from the d007 probe write. Pure reads, no writes, no notify."""
+import os
 import asyncio
 from bleak import BleakClient
 
-ADDRESS = "AA:BB:CC:DD:EE:FF"
+ADDRESS = os.environ["C1_ADDRESS"]
 CHARS = {
     "d001": "0000d001-0000-1000-8000-00805f9b34fb",
     "d003": "0000d003-0000-1000-8000-00805f9b34fb",

@@ -5,6 +5,7 @@ existing recording rather than originating a new one from idle. Compares
 the returned sessionId (if any) against whatever real sessionId the device
 reports via spontaneous START_IND/STOP_IND indications during this window.
 """
+import os
 import asyncio
 import json
 from datetime import datetime, timezone
@@ -12,7 +13,7 @@ from pathlib import Path
 
 from bleak import BleakClient
 
-ADDRESS = "AA:BB:CC:DD:EE:FF"
+ADDRESS = os.environ["C1_ADDRESS"]
 UUID_D005_STATE = "0000d005-0000-1000-8000-00805f9b34fb"
 UUID_CMD_A2S = "00002bb1-0000-1000-8000-00805f9b34fb"
 UUID_CMD_S2A = "00002bb0-0000-1000-8000-00805f9b34fb"

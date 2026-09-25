@@ -11,6 +11,7 @@ C1TaskCreator} — see docs/apk-protocol-recovery.md. Nothing here guesses.
 Explicitly NOT sent: delRecord, restore factory settings, depair, OTA,
 any unknown opcode.
 """
+import os
 import asyncio
 import json
 import sys
@@ -19,7 +20,7 @@ from pathlib import Path
 
 from bleak import BleakClient
 
-ADDRESS = "AA:BB:CC:DD:EE:FF"
+ADDRESS = os.environ["C1_ADDRESS"]
 
 UUID_BATTERY = "00002a19-0000-1000-8000-00805f9b34fb"
 UUID_D001_VERSION = "0000d001-0000-1000-8000-00805f9b34fb"

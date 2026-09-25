@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Full, systematic real-device verification of the C1 BLE protocol recovered
+import os
 from static analysis of Sogou AI Recorder APK v1.2.2.
 
 Every opcode/packet layout used here comes from decompiled
@@ -31,7 +32,7 @@ from pathlib import Path
 
 from bleak import BleakClient
 
-ADDRESS = "AA:BB:CC:DD:EE:FF"
+ADDRESS = os.environ["C1_ADDRESS"]
 
 # --- GATT UUIDs (confirmed on real device + APK cross-reference) ---
 UUID_BATTERY = "00002a19-0000-1000-8000-00805f9b34fb"

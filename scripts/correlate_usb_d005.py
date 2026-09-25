@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """Correlate d005's value with USB filesystem activity. Read-only throughout:
 only reads d005 over BLE, and only reads (ls/cat) the mounted USB volume."""
+import os
 import asyncio
 import subprocess
 from datetime import datetime, timezone
 from bleak import BleakClient
 
-ADDRESS = "AA:BB:CC:DD:EE:FF"
+ADDRESS = os.environ["C1_ADDRESS"]
 D005 = "0000d005-0000-1000-8000-00805f9b34fb"
-USB_PATH = "/media/<user>/SOGOU C1"
+USB_PATH = os.environ["C1_USB_ROOT"]
 
 
 async def read_d005(client, label):

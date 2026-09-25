@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Subscribe to a notify characteristic and passively log whatever the device
 sends on its own. Never writes to any other characteristic."""
+import os
 import asyncio
 import json
 import sys
@@ -43,7 +44,7 @@ async def main(address, char_uuid, duration):
 
 
 if __name__ == "__main__":
-    addr = sys.argv[1] if len(sys.argv) > 1 else "AA:BB:CC:DD:EE:FF"
+    addr = sys.argv[1] if len(sys.argv) > 1 else os.environ["C1_ADDRESS"]
     char = sys.argv[2] if len(sys.argv) > 2 else "0000b001-0000-1000-8000-00805f9b34fb"
     dur = int(sys.argv[3]) if len(sys.argv) > 3 else 45
     asyncio.run(main(addr, char, dur))

@@ -7,6 +7,7 @@ indicate (2bb0, command responses / spontaneous IND messages) and notify
 indicate/notify traffic that shows up on its own. No commands sent besides
 the read-only state polling and the one proven-necessary handshake.
 """
+import os
 import asyncio
 import json
 from datetime import datetime, timezone
@@ -14,7 +15,7 @@ from pathlib import Path
 
 from bleak import BleakClient
 
-ADDRESS = "AA:BB:CC:DD:EE:FF"
+ADDRESS = os.environ["C1_ADDRESS"]
 UUID_D005_STATE = "0000d005-0000-1000-8000-00805f9b34fb"
 UUID_CMD_A2S = "00002bb1-0000-1000-8000-00805f9b34fb"
 UUID_CMD_S2A = "00002bb0-0000-1000-8000-00805f9b34fb"

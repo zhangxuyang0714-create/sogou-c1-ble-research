@@ -4,6 +4,7 @@
 Read-only: only calls read_gatt_char() on characteristics that advertise the
 'read' property. Never writes, never subscribes to notify, never pairs.
 """
+import os
 import asyncio
 import json
 import sys
@@ -71,5 +72,5 @@ async def main(address):
 
 
 if __name__ == "__main__":
-    addr = sys.argv[1] if len(sys.argv) > 1 else "AA:BB:CC:DD:EE:FF"
+    addr = sys.argv[1] if len(sys.argv) > 1 else os.environ["C1_ADDRESS"]
     asyncio.run(main(addr))

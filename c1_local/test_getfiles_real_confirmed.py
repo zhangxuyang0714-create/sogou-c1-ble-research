@@ -4,6 +4,7 @@ truth exactly. Entry format corrected: 12 bytes each (sessionId 4B LE +
 duration_ms 4B LE + constant=1 4B), not 8 bytes as previously assumed.
 Paginate for the rest, then try getFiles on a confirmed-real sessionId.
 """
+import os
 import asyncio
 import json
 from datetime import datetime, timezone
@@ -11,7 +12,7 @@ from pathlib import Path
 
 from bleak import BleakClient
 
-ADDRESS = "AA:BB:CC:DD:EE:FF"
+ADDRESS = os.environ["C1_ADDRESS"]
 UUID_CMD_A2S = "00002bb1-0000-1000-8000-00805f9b34fb"
 UUID_CMD_S2A = "00002bb0-0000-1000-8000-00805f9b34fb"
 UUID_FILE_S2A = "0000b001-0000-1000-8000-00805f9b34fb"

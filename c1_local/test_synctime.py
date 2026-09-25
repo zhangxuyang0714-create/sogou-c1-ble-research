@@ -9,6 +9,7 @@ write-capable characteristic in the dd68/CONFIG service besides d007
 itself... i.e. it's the one candidate, since d009 which might be the other
 CONFIG write field is absent on this hardware).
 """
+import os
 import asyncio
 import time
 import json
@@ -17,7 +18,7 @@ from pathlib import Path
 
 from bleak import BleakClient
 
-ADDRESS = "AA:BB:CC:DD:EE:FF"
+ADDRESS = os.environ["C1_ADDRESS"]
 UUID_D005_STATE = "0000d005-0000-1000-8000-00805f9b34fb"
 UUID_D007_SYNCTIME_CANDIDATE = "0000d007-0000-1000-8000-00805f9b34fb"
 UUID_CMD_A2S = "00002bb1-0000-1000-8000-00805f9b34fb"

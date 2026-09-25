@@ -2,6 +2,7 @@
 """Passive indicate subscription on 1910/2bb0. Same low-risk category as the
 earlier b001 notify subscription: enabling a standard CCCD to listen, no
 writes to any vendor command characteristic."""
+import os
 import asyncio
 import json
 from datetime import datetime, timezone
@@ -11,7 +12,7 @@ from bleak import BleakClient
 CAPTURES_DIR = Path(__file__).resolve().parent.parent / "captures"
 CAPTURES_DIR.mkdir(exist_ok=True)
 
-ADDRESS = "AA:BB:CC:DD:EE:FF"
+ADDRESS = os.environ["C1_ADDRESS"]
 CHAR_2BB0 = "00002bb0-0000-1000-8000-00805f9b34fb"
 D005 = "0000d005-0000-1000-8000-00805f9b34fb"
 

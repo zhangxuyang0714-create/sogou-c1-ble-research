@@ -4,6 +4,7 @@ confirmed via a successful opcode10 response (sent while device was
 actively recording): 0x6aad063b. Recording has since ended (state back to
 idle), so the file should be fully flushed to flash.
 """
+import os
 import asyncio
 import json
 from datetime import datetime, timezone
@@ -11,7 +12,7 @@ from pathlib import Path
 
 from bleak import BleakClient
 
-ADDRESS = "AA:BB:CC:DD:EE:FF"
+ADDRESS = os.environ["C1_ADDRESS"]
 UUID_D005_STATE = "0000d005-0000-1000-8000-00805f9b34fb"
 UUID_CMD_A2S = "00002bb1-0000-1000-8000-00805f9b34fb"
 UUID_CMD_S2A = "00002bb0-0000-1000-8000-00805f9b34fb"

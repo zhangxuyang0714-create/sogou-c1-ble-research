@@ -3,10 +3,11 @@
 real code role = OTA upload channel, not a documented getFiles trigger)
 change getFiles' "no file" response for a known-real session? No code
 evidence supports this; single 0x00 byte, one attempt only."""
+import os
 import asyncio
 from bleak import BleakClient
 
-ADDRESS = "AA:BB:CC:DD:EE:FF"
+ADDRESS = os.environ["C1_ADDRESS"]
 UUID_CMD_A2S = "00002bb1-0000-1000-8000-00805f9b34fb"
 UUID_CMD_S2A = "00002bb0-0000-1000-8000-00805f9b34fb"
 UUID_FILE_A2S = "0000b002-0000-1000-8000-00805f9b34fb"

@@ -6,7 +6,7 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 
-USB_ROOT = "/media/<user>/SOGOU C1"
+USB_ROOT = os.environ["C1_USB_ROOT"]
 OUT_PATH = Path(__file__).resolve().parent.parent / "captures" / "usb_baseline.json"
 
 

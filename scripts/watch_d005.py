@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """Connect once, then read d005 repeatedly within the SAME connection to see
 if its value is connection-transient or actually stable/changing over time."""
+import os
 import asyncio
 from datetime import datetime, timezone
 from bleak import BleakClient
 
-ADDRESS = "AA:BB:CC:DD:EE:FF"
+ADDRESS = os.environ["C1_ADDRESS"]
 D005 = "0000d005-0000-1000-8000-00805f9b34fb"
 
 

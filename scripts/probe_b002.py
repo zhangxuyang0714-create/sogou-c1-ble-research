@@ -12,6 +12,7 @@ This is a ONE-SHOT, user-authorized experiment. It:
   6. Re-reads state and battery, compares to baseline.
   7. Reports everything raw. Does NOT retry or try other payloads.
 """
+import os
 import asyncio
 import json
 import sys
@@ -24,7 +25,7 @@ from bleak.exc import BleakError
 CAPTURES_DIR = Path(__file__).resolve().parent.parent / "captures"
 CAPTURES_DIR.mkdir(exist_ok=True)
 
-ADDRESS = "AA:BB:CC:DD:EE:FF"
+ADDRESS = os.environ["C1_ADDRESS"]
 B002 = "0000b002-0000-1000-8000-00805f9b34fb"
 D005 = "0000d005-0000-1000-8000-00805f9b34fb"
 D001 = "0000d001-0000-1000-8000-00805f9b34fb"
